@@ -146,4 +146,5 @@ dmypy.json
 .vscode/
 src/plugins/
 /nonebot_plugin_avatar_manager/
+/data/
 # End of https://www.toptal.com/developers/gitignore/api/python

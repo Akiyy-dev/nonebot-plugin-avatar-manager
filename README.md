@@ -59,31 +59,13 @@ pip install nonebot-plugin-avatar-manager
 
 </details>
 
-<details>
-<summary>pdm</summary>
-
-```bash
-pdm add nonebot-plugin-avatar-manager
-```
-
-</details>
-
-<details>
-<summary>poetry</summary>
-
-```bash
-poetry add nonebot-plugin-avatar-manager
-```
-
-</details>
-
-</details>
-
 安装完成后，打开 nonebot2 项目根目录下的 pyproject.toml 文件，在 `[tool.nonebot]` 部分追加写入：
 
 ```toml
 plugins = ["nonebot_plugin_avatar_manager"]
 ```
+
+</details>
 
 ## ⚙️ 配置
 
@@ -144,30 +126,3 @@ bot定时修改 0 9 * * 1 https://example.com/avatar.jpg
 
 - `data/avatar_manager/tasks.json`：保存定时任务
 - `data/avatar_manager/temp`：保存下载的临时图片
-
-## 说明
-
-插件当前通过 OneBot V11 风格 API 调用以下能力：
-
-- `set_qq_avatar`
-- `set_qq_profile`
-- `set_group_portrait`
-- `set_group_name`
-
-这些接口是否可用取决于你接入的具体 OneBot V11 实现。如果目标实现不支持对应 API，插件会返回失败信息并记录日志，而不会直接导致任务系统崩溃。
-
-## 开发
-
-本仓库使用 PDM 作为构建后端，开发时可执行：
-
-```bash
-pdm install
-```
-
-```bash
-pdm run lint
-```
-
-```bash
-pdm run test
-```
