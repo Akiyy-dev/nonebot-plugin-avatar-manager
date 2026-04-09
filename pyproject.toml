@@ -1,6 +1,6 @@
 [project]
 name = "nonebot-plugin-avatar-manager"
-version = "1.0.0"
+version = "1.0.1"
 description = "NoneBot2 头像管理插件，支持机器人与群资料的立即修改和定时修改。"
 authors = [
     {name = "Akiyy-Lab", email = "2806578374@qq.com"},

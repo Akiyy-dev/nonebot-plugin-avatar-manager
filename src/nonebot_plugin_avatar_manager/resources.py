@@ -47,6 +47,7 @@ def _ensure_target_paths(target_key: str) -> dict[str, Path]:
         "base": base_dir,
         "uploaded_avatar_dir": uploaded_avatar_dir,
         "remote_avatar_dir": remote_avatar_dir,
+        "uploaded_avatar_list_file": base_dir / "avatar_storage_list.txt",
         "uploaded_names_file": base_dir / "uploaded_names.txt",
     }
 
@@ -180,6 +181,18 @@ def _read_lines(path: Path) -> list[str]:
     except OSError as exception:
         logger.warning(f"读取文本资源失败: {path} | error={exception}")
         return []
+
+
+def _append_line(path: Path, value: str) -> None:
+    existing_values = _read_lines(path)
+    if value in existing_values:
+        return
+
+    try:
+        with path.open("a", encoding="utf-8") as file:
+            file.write(value + "\n")
+    except OSError as exception:
+        raise ValueError(f"保存存储列表失败: {exception}") from exception
 
 
 def has_uploaded_avatars(target_type: str, target_id: int | None) -> bool:
@@ -360,7 +373,12 @@ async def save_uploaded_image(
         file_path = paths["uploaded_avatar_dir"] / f"upload_{timestamp}{suffix}"
         content = await _download_bytes(image_source)
         _validate_image_content(content)
-        return await _write_bytes(file_path, content)
+        saved_path = await _write_bytes(file_path, content)
+        _append_line(
+            paths["uploaded_avatar_list_file"],
+            _normalize_path_value(saved_path),
+        )
+        return saved_path
 
     source_path = Path(image_source)
     if not source_path.exists() or not source_path.is_file():
@@ -378,7 +396,12 @@ async def save_uploaded_image(
         shutil.copy2(source_path, file_path)
         return file_path
 
-    return await asyncio.to_thread(_copy)
+    saved_path = await asyncio.to_thread(_copy)
+    _append_line(
+        paths["uploaded_avatar_list_file"],
+        _normalize_path_value(saved_path),
+    )
+    return saved_path
 
 
 def save_uploaded_name(target_type: str, target_id: int | None, name: str) -> bool:
@@ -390,11 +413,7 @@ def save_uploaded_name(target_type: str, target_id: int | None, name: str) -> bo
     if normalized_name in existing_names:
         return False
 
-    try:
-        with paths["uploaded_names_file"].open("a", encoding="utf-8") as file:
-            file.write(normalized_name + "\n")
-    except OSError as exception:
-        raise ValueError(f"保存名称资源失败: {exception}") from exception
+    _append_line(paths["uploaded_names_file"], normalized_name)
 
     return True
 
@@ -409,7 +428,13 @@ def _list_local_image_files(directory: Path) -> list[str]:
 
 def _list_uploaded_images(target_key: str) -> list[str]:
     paths = _ensure_target_paths(target_key)
-    return _list_local_image_files(paths["uploaded_avatar_dir"])
+    listed_images = [
+        image_path
+        for image_path in _read_lines(paths["uploaded_avatar_list_file"])
+        if Path(image_path).exists()
+    ]
+    directory_images = _list_local_image_files(paths["uploaded_avatar_dir"])
+    return _deduplicate_preserving_order(listed_images + directory_images)
 
 
 def _list_uploaded_names(target_key: str) -> list[str]:

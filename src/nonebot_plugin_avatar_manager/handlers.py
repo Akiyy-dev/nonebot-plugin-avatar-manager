@@ -20,6 +20,8 @@ from .resources import (
     classify_source_token,
     has_uploaded_avatars,
     has_uploaded_names,
+    resolve_avatar_resource,
+    resolve_name_resource,
     save_uploaded_image,
     save_uploaded_name,
 )
@@ -115,6 +117,22 @@ del_schedule = on_command(
 
 upload_resource = on_command(
     "上传",
+    permission=GROUP_ADMIN | GROUP_OWNER,
+    rule=Rule(_group_only),
+    priority=5,
+    block=True,
+)
+
+random_avatar = on_command(
+    "随机头像",
+    permission=GROUP_ADMIN | GROUP_OWNER,
+    rule=Rule(_group_only),
+    priority=5,
+    block=True,
+)
+
+random_name = on_command(
+    "随机名称",
     permission=GROUP_ADMIN | GROUP_OWNER,
     rule=Rule(_group_only),
     priority=5,
@@ -255,18 +273,23 @@ async def avatar_help_handler(
 - bot修改
 - bot定时修改
 - 上传
+- 随机头像
+- 随机名称
 - 定时列表 / schedule_list
 - 删除定时 / del_schedule
 
 示例:
 - 群聊中发送：修改 https://example.com/avatar.jpg
-- 群聊中发送：修改 https://example.com/avatar-list.txt
-- 群聊中发送：修改 names.txt
-- 群聊中发送：修改 avatars.txt names.txt
+- 群聊中发送：修改 https://example.com/avatar_list.txt
+- 群聊中发送：修改 name_list.txt
+- 群聊中发送：修改 avatar_list.txt name_list.txt
 - 群聊中发送：修改 example
 - 群聊中发送：修改 https://example.com/avatar.jpg example
-- 群聊中发送：定时修改 0 8 * * * https://example.com/avatar-list.txt names.txt
+- 群聊中发送：定时修改 0 8 * * * https://example.com/avatar_list.txt name_list.txt
 - 群聊中发送：上传
+- 群聊中发送：取消
+- 群聊中发送：随机头像
+- 群聊中发送：随机名称
 - 私聊或群聊中超级管理员发送：bot修改 https://example.com/avatar.jpg
 - 私聊或群聊中超级管理员发送：bot定时修改 0 8 * * * https://example.com/avatar.jpg
 
@@ -277,6 +300,7 @@ async def avatar_help_handler(
 注意:
 - 具体 API 可用性取决于你使用的 OneBot V11 实现。
 - 图片清单 txt 与名称清单 txt 会在执行前重新读取，并与本群已上传资源合并。
+- 上传图片会保存到 data 中，并写入本群本地存储列表。
 """.strip()
     await avatar_help.finish(help_text)
 
@@ -509,7 +533,7 @@ async def del_schedule_handler(
 @upload_resource.handle()
 async def upload_resource_handler(event: GroupMessageEvent) -> None:
     await upload_resource.send(
-        "请发送下一条消息：图片会保存为头像资源，纯文本会保存为名称资源"
+        "请发送下一条消息：图片会保存为头像资源，纯文本会保存为名称资源，发送取消可终止上传"
     )
 
 
@@ -519,6 +543,10 @@ async def upload_resource_receive_handler(
     resource: Message = Arg("resource"),
 ) -> None:
     image_input = _extract_image_input(resource)
+    text = resource.extract_plain_text().strip()
+    if image_input is None and text == "取消":
+        await upload_resource.finish("已取消上传")
+
     if image_input is not None:
         try:
             saved_path = await save_uploaded_image(
@@ -531,7 +559,6 @@ async def upload_resource_receive_handler(
 
         await upload_resource.finish(f"已保存头像资源: {saved_path.name}")
 
-    text = resource.extract_plain_text().strip()
     if not text:
         await upload_resource.reject("未识别到图片或文本，请重新发送")
 
@@ -544,3 +571,53 @@ async def upload_resource_receive_handler(
         await upload_resource.finish(f"已保存名称资源: {text}")
 
     await upload_resource.finish(f"名称资源已存在: {text}")
+
+
+@random_avatar.handle()
+async def random_avatar_handler(event: GroupMessageEvent, bot: Bot) -> None:
+    image_path = await resolve_avatar_resource(
+        None,
+        "group",
+        int(event.group_id),
+        False,
+    )
+    if image_path is None:
+        await random_avatar.finish("当前本地存储列表中没有可用头像资源")
+
+    task = ScheduleTask(
+        job_id=_build_job_id("group"),
+        target_type="group",
+        target_id=int(event.group_id),
+        cron="0 0 1 1 *",
+        image_path=image_path,
+    )
+    success, message = await run_task_now(task)
+    if not success:
+        await random_avatar.finish(f"随机更换头像失败: {message}")
+
+    await random_avatar.finish("已从本地存储列表中随机更换当前群头像")
+
+
+@random_name.handle()
+async def random_name_handler(event: GroupMessageEvent, bot: Bot) -> None:
+    name_value = await resolve_name_resource(
+        None,
+        "group",
+        int(event.group_id),
+        False,
+    )
+    if name_value is None:
+        await random_name.finish("当前本地存储列表中没有可用名称资源")
+
+    task = ScheduleTask(
+        job_id=_build_job_id("group"),
+        target_type="group",
+        target_id=int(event.group_id),
+        cron="0 0 1 1 *",
+        new_name=name_value,
+    )
+    success, message = await run_task_now(task)
+    if not success:
+        await random_name.finish(f"随机更换名称失败: {message}")
+
+    await random_name.finish("已从本地存储列表中随机更换当前群名称")
