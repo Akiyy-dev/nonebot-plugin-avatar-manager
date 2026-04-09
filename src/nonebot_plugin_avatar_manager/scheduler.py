@@ -1,7 +1,6 @@
 import asyncio
 import json
 from pathlib import Path
-from typing import Dict
 
 import nonebot
 from nonebot import logger
@@ -12,12 +11,12 @@ from nonebot_plugin_apscheduler import scheduler
 from .models import ScheduleTask
 from .utils import TEMP_DIR, image_to_base64
 
-tasks: Dict[str, ScheduleTask] = {}
+tasks: dict[str, ScheduleTask] = {}
 data_dir = Path("data/avatar_manager")
 tasks_file = data_dir / "tasks.json"
 
 
-def load_tasks() -> Dict[str, ScheduleTask]:
+def load_tasks() -> dict[str, ScheduleTask]:
     if not tasks_file.exists():
         return {}
 
@@ -27,7 +26,7 @@ def load_tasks() -> Dict[str, ScheduleTask]:
         logger.error(f"读取任务文件失败: {exception}")
         return {}
 
-    loaded_tasks: Dict[str, ScheduleTask] = {}
+    loaded_tasks: dict[str, ScheduleTask] = {}
     for job_id, task_data in raw_data.items():
         try:
             loaded_tasks[job_id] = ScheduleTask.model_validate(task_data)

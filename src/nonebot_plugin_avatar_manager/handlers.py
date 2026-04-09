@@ -3,7 +3,12 @@ from datetime import datetime
 from pathlib import Path
 
 from nonebot import get_driver, logger, on_command
-from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, PrivateMessageEvent
+from nonebot.adapters.onebot.v11 import (
+    Bot,
+    GroupMessageEvent,
+    Message,
+    PrivateMessageEvent,
+)
 from nonebot.adapters.onebot.v11.permission import GROUP_ADMIN, GROUP_OWNER
 from nonebot.params import CommandArg
 from nonebot.permission import SUPERUSER
@@ -394,9 +399,15 @@ async def schedule_list_handler(
         await schedule_list.finish("当前没有定时任务")
 
     lines = [
-        (
-            f"- {task.job_id} | target={task.target_type} | target_id={task.target_id or '-'}"
-            f" | cron={task.cron} | name={task.new_name or '-'} | image={task.image_path or '-'}"
+        " | ".join(
+            [
+                f"- {task.job_id}",
+                f"target={task.target_type}",
+                f"target_id={task.target_id or '-'}",
+                f"cron={task.cron}",
+                f"name={task.new_name or '-'}",
+                f"image={task.image_path or '-'}",
+            ]
         )
         for task in filtered_tasks
     ]
@@ -413,7 +424,12 @@ async def del_schedule_handler(
 
     task = tasks.get(job_id)
     if isinstance(event, GroupMessageEvent):
-        if task is None or task.target_type != "group" or task.target_id != int(event.group_id):
+        invalid_group_task = (
+            task is None
+            or task.target_type != "group"
+            or task.target_id != int(event.group_id)
+        )
+        if invalid_group_task:
             await del_schedule.finish("未找到本群对应的任务 ID")
 
     if not remove_job(job_id):
