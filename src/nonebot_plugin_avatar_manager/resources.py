@@ -173,6 +173,21 @@ def _validate_manifest_lines(entries: list[str], *, kind: str) -> list[str]:
     return validated_entries
 
 
+def _resolve_manifest_avatar_entry(source: str, entry: str) -> str:
+    if _is_remote_url(entry):
+        return entry
+
+    if _is_remote_url(source):
+        return entry
+
+    entry_path = Path(entry)
+    if entry_path.is_absolute():
+        return str(entry_path)
+
+    source_path = Path(source)
+    return str((source_path.resolve().parent / entry_path).resolve())
+
+
 def _validate_name_value(name: str) -> str:
     normalized_name = name.strip()
     if not normalized_name:
@@ -236,6 +251,10 @@ def has_uploaded_names(target_type: str, target_id: int | None) -> bool:
 
 
 async def _download_bytes(url: str) -> bytes:
+    return await _download_limited_bytes(url, max_bytes=MAX_IMAGE_BYTES)
+
+
+async def _download_limited_bytes(url: str, *, max_bytes: int) -> bytes:
     _ensure_remote_url(url)
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(20.0, connect=10.0),
@@ -245,43 +264,29 @@ async def _download_bytes(url: str) -> bytes:
             response.raise_for_status()
 
             content_length = response.headers.get("Content-Length")
-            if content_length and int(content_length) > MAX_IMAGE_BYTES:
-                raise ValueError(f"远程图片大小超过限制 {MAX_IMAGE_BYTES} 字节")
+            if content_length:
+                try:
+                    reported_bytes = int(content_length)
+                except ValueError:
+                    reported_bytes = None
+                if reported_bytes and reported_bytes > max_bytes:
+                    raise ValueError(f"远程资源大小超过限制 {max_bytes} 字节")
 
             chunks: list[bytes] = []
             total_bytes = 0
             async for chunk in response.aiter_bytes():
                 total_bytes += len(chunk)
-                if total_bytes > MAX_IMAGE_BYTES:
-                    raise ValueError(f"远程图片大小超过限制 {MAX_IMAGE_BYTES} 字节")
+                if total_bytes > max_bytes:
+                    raise ValueError(f"远程资源大小超过限制 {max_bytes} 字节")
                 chunks.append(chunk)
 
     return b"".join(chunks)
 
 
 async def _read_remote_text(url: str) -> str:
-    _ensure_remote_url(url)
-    async with httpx.AsyncClient(
-        timeout=httpx.Timeout(20.0, connect=10.0),
-        follow_redirects=True,
-    ) as client:
-        async with client.stream("GET", url) as response:
-            response.raise_for_status()
-
-            content_length = response.headers.get("Content-Length")
-            if content_length and int(content_length) > MAX_TEXT_BYTES:
-                raise ValueError(f"文本清单大小超过限制 {MAX_TEXT_BYTES} 字节")
-
-            chunks: list[bytes] = []
-            total_bytes = 0
-            async for chunk in response.aiter_bytes():
-                total_bytes += len(chunk)
-                if total_bytes > MAX_TEXT_BYTES:
-                    raise ValueError(f"文本清单大小超过限制 {MAX_TEXT_BYTES} 字节")
-                chunks.append(chunk)
-
     try:
-        return b"".join(chunks).decode("utf-8")
+        content = await _download_limited_bytes(url, max_bytes=MAX_TEXT_BYTES)
+        return content.decode("utf-8")
     except UnicodeDecodeError as exception:
         raise ValueError("文本清单必须为 UTF-8 编码") from exception
 
@@ -381,7 +386,11 @@ async def classify_source_token(value: str) -> str | None:
     if not entries:
         raise ValueError("文本清单为空")
 
-    if all(_is_image_reference(entry) for entry in entries):
+    resolved_entries = [
+        _resolve_manifest_avatar_entry(value, entry)
+        for entry in entries
+    ]
+    if all(_is_image_reference(entry) for entry in resolved_entries):
         return "avatar_manifest"
 
     return "name_manifest"
@@ -578,11 +587,17 @@ async def _load_avatar_manifest(source: str) -> list[str]:
     if not entries:
         raise ValueError("头像清单为空")
 
-    invalid_entries = [entry for entry in entries if not _is_image_reference(entry)]
+    resolved_entries = [
+        _resolve_manifest_avatar_entry(source, entry)
+        for entry in entries
+    ]
+    invalid_entries = [
+        entry for entry in resolved_entries if not _is_image_reference(entry)
+    ]
     if invalid_entries:
         raise ValueError("头像清单中存在非图片资源条目")
 
-    return _deduplicate_preserving_order(entries)
+    return _deduplicate_preserving_order(resolved_entries)
 
 
 async def _load_name_manifest(source: str) -> list[str]:

@@ -17,6 +17,21 @@ data_dir = Path("data/avatar_manager")
 tasks_file = data_dir / "tasks.json"
 
 
+def _sorted_task_items(
+    source: dict[str, ScheduleTask] | None = None,
+) -> list[tuple[str, ScheduleTask]]:
+    task_mapping = tasks if source is None else source
+    return sorted(
+        task_mapping.items(),
+        key=lambda item: (
+            item[1].create_time,
+            item[1].target_type,
+            item[1].target_id or 0,
+            item[0],
+        ),
+    )
+
+
 def load_tasks() -> dict[str, ScheduleTask]:
     if not tasks_file.exists():
         return {}
@@ -41,7 +56,7 @@ def save_tasks() -> None:
         data_dir.mkdir(parents=True, exist_ok=True)
         payload = {
             job_id: task.model_dump(mode="json")
-            for job_id, task in tasks.items()
+            for job_id, task in _sorted_task_items()
         }
         tasks_file.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
@@ -63,6 +78,18 @@ def _cron_to_kwargs(cron: str) -> dict[str, str]:
         "month": parts[3],
         "day_of_week": parts[4],
     }
+
+
+def _schedule_task(task: ScheduleTask) -> None:
+    cron_kwargs = _cron_to_kwargs(task.cron)
+    scheduler.add_job(
+        _run_task,
+        "cron",
+        id=task.job_id,
+        args=[task.job_id],
+        replace_existing=True,
+        **cron_kwargs,
+    )
 
 
 async def _resolve_bot() -> Bot | None:
@@ -170,17 +197,24 @@ async def run_task_now(task: ScheduleTask) -> tuple[bool, str]:
 
 
 def add_job(task: ScheduleTask) -> None:
-    cron_kwargs = _cron_to_kwargs(task.cron)
+    _schedule_task(task)
     tasks[task.job_id] = task
-    scheduler.add_job(
-        _run_task,
-        "cron",
-        id=task.job_id,
-        args=[task.job_id],
-        replace_existing=True,
-        **cron_kwargs,
-    )
     save_tasks()
+
+
+def list_tasks(
+    *,
+    target_type: str | None = None,
+    target_id: int | None = None,
+) -> list[ScheduleTask]:
+    filtered_tasks: list[ScheduleTask] = []
+    for _, task in _sorted_task_items():
+        if target_type is not None and task.target_type != target_type:
+            continue
+        if target_id is not None and task.target_id != target_id:
+            continue
+        filtered_tasks.append(task)
+    return filtered_tasks
 
 
 def remove_job(job_id: str) -> bool:
@@ -198,24 +232,22 @@ def remove_job(job_id: str) -> bool:
 
 
 async def init_scheduler() -> None:
+    loaded_tasks = load_tasks()
     tasks.clear()
-    tasks.update(load_tasks())
 
     restored_count = 0
-    for task in tasks.values():
+    failed_job_ids: list[str] = []
+    for _, task in _sorted_task_items(loaded_tasks):
         try:
-            cron_kwargs = _cron_to_kwargs(task.cron)
-            scheduler.add_job(
-                _run_task,
-                "cron",
-                id=task.job_id,
-                args=[task.job_id],
-                replace_existing=True,
-                **cron_kwargs,
-            )
+            _schedule_task(task)
+            tasks[task.job_id] = task
             restored_count += 1
         except Exception as exception:
+            failed_job_ids.append(task.job_id)
             logger.error(f"恢复任务失败: {task.job_id} | error={exception}")
+
+    if failed_job_ids:
+        save_tasks()
 
     logger.info(f"头像管理器定时任务已恢复，共 {restored_count} 个任务")
 

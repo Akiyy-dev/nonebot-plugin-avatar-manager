@@ -1,6 +1,8 @@
+import asyncio
 import shlex
 from datetime import datetime
 from pathlib import Path
+from secrets import token_hex
 
 from nonebot import get_driver, logger, on_command
 from nonebot.adapters.onebot.v11 import (
@@ -28,11 +30,13 @@ from .resources import (
     save_uploaded_image,
     save_uploaded_name,
 )
-from .scheduler import add_job, remove_job, run_task_now, tasks
+from .scheduler import add_job, list_tasks, remove_job, run_task_now, tasks
 
 driver = get_driver()
 plugin_config = Config.model_validate(driver.config.dict())
 manage_permission = SUPERUSER | GROUP_ADMIN | GROUP_OWNER
+IMMEDIATE_TASK_CRON = "0 0 1 1 *"
+GROUP_MEMBER_QUERY_CONCURRENCY = 6
 
 
 async def _private_only(event: PrivateMessageEvent) -> bool:
@@ -41,10 +45,6 @@ async def _private_only(event: PrivateMessageEvent) -> bool:
 
 async def _group_only(event: GroupMessageEvent) -> bool:
     return True
-
-
-def _looks_like_url(value: str) -> bool:
-    return value.startswith(("http://", "https://"))
 
 
 avatar_help = on_command(
@@ -208,7 +208,85 @@ def _extract_image_input(arg: Message) -> str | None:
 
 
 def _build_job_id(target_type: str) -> str:
-    return f"avatar_{target_type}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
+    return f"avatar_{target_type}_{timestamp}_{token_hex(2)}"
+
+
+def _build_task(
+    target_type: str,
+    *,
+    target_id: int | None = None,
+    cron: str = IMMEDIATE_TASK_CRON,
+    image_path: str | None = None,
+    new_name: str | None = None,
+) -> ScheduleTask:
+    return ScheduleTask(
+        job_id=_build_job_id(target_type),
+        target_type=target_type,
+        target_id=target_id,
+        cron=cron,
+        image_path=image_path,
+        new_name=new_name,
+    )
+
+
+async def _run_immediate_change(
+    target_type: str,
+    *,
+    target_id: int | None = None,
+    image_path: str | None = None,
+    new_name: str | None = None,
+) -> tuple[bool, str]:
+    task = _build_task(
+        target_type,
+        target_id=target_id,
+        image_path=image_path,
+        new_name=new_name,
+    )
+    return await run_task_now(task)
+
+
+def _create_scheduled_change(
+    target_type: str,
+    *,
+    target_id: int | None = None,
+    cron: str,
+    image_path: str | None = None,
+    new_name: str | None = None,
+) -> ScheduleTask:
+    task = _build_task(
+        target_type,
+        target_id=target_id,
+        cron=cron,
+        image_path=image_path,
+        new_name=new_name,
+    )
+    add_job(task)
+    return task
+
+
+async def _get_manageable_group_entry(
+    bot: Bot,
+    group: dict,
+    semaphore: asyncio.Semaphore,
+) -> str | None:
+    group_id = int(group["group_id"])
+    async with semaphore:
+        try:
+            member_info = await bot.get_group_member_info(
+                group_id=group_id,
+                user_id=int(bot.self_id),
+            )
+        except Exception as exception:
+            logger.warning(f"查询群 {group_id} 权限失败: {exception}")
+            return None
+
+    role = str(member_info.get("role", "member"))
+    if role not in {"owner", "admin"}:
+        return None
+
+    group_name = str(group.get("group_name", "未知群名"))
+    return f"- {group_id} | {group_name} | {role}"
 
 
 async def _resolve_image_value(image_input: str | None) -> str | None:
@@ -507,22 +585,17 @@ async def group_manage_handler(
     except Exception as exception:
         await group_manage.finish(f"获取群列表失败: {exception}")
 
-    manageable_groups: list[str] = []
-    for group in group_list:
-        group_id = int(group["group_id"])
-        try:
-            member_info = await bot.get_group_member_info(
-                group_id=group_id,
-                user_id=int(bot.self_id),
-            )
-        except Exception as exception:
-            logger.warning(f"查询群 {group_id} 权限失败: {exception}")
-            continue
-
-        role = str(member_info.get("role", "member"))
-        if role in {"owner", "admin"}:
-            group_name = str(group.get("group_name", "未知群名"))
-            manageable_groups.append(f"- {group_id} | {group_name} | {role}")
+    semaphore = asyncio.Semaphore(GROUP_MEMBER_QUERY_CONCURRENCY)
+    manageable_groups = [
+        group_entry
+        for group_entry in await asyncio.gather(
+            *[
+                _get_manageable_group_entry(bot, group, semaphore)
+                for group in group_list
+            ]
+        )
+        if group_entry is not None
+    ]
 
     if not manageable_groups:
         await group_manage.finish("无管理权限")
@@ -540,14 +613,11 @@ async def group_modify_avatar_handler(
 
         image_path = await _parse_avatar_payload(arg)
         _ensure_avatar_resource_available("group", int(event.group_id), image_path)
-        task = ScheduleTask(
-            job_id=_build_job_id("group"),
-            target_type="group",
+        success, message = await _run_immediate_change(
+            "group",
             target_id=int(event.group_id),
-            cron="0 0 1 1 *",
             image_path=image_path,
         )
-        success, message = await run_task_now(task)
         if not success:
             await group_modify_avatar.finish(f"立即修改头像失败: {message}")
     except ValueError as exception:
@@ -568,14 +638,11 @@ async def group_modify_name_handler(
 
         new_name = await _parse_name_payload(arg)
         _ensure_name_resource_available("group", int(event.group_id), new_name)
-        task = ScheduleTask(
-            job_id=_build_job_id("group"),
-            target_type="group",
+        success, message = await _run_immediate_change(
+            "group",
             target_id=int(event.group_id),
-            cron="0 0 1 1 *",
             new_name=new_name,
         )
-        success, message = await run_task_now(task)
         if not success:
             await group_modify_name.finish(f"立即修改名称失败: {message}")
     except ValueError as exception:
@@ -596,14 +663,12 @@ async def group_schedule_avatar_handler(
 
         cron, image_path = await _parse_timed_avatar_payload(arg)
         _ensure_avatar_resource_available("group", int(event.group_id), image_path)
-        task = ScheduleTask(
-            job_id=_build_job_id("group"),
-            target_type="group",
+        task = _create_scheduled_change(
+            "group",
             target_id=int(event.group_id),
             cron=cron,
             image_path=image_path,
         )
-        add_job(task)
     except ValueError as exception:
         await group_schedule_avatar.finish(str(exception))
     except Exception as exception:
@@ -622,14 +687,12 @@ async def group_schedule_name_handler(
 
         cron, new_name = await _parse_timed_name_payload(arg)
         _ensure_name_resource_available("group", int(event.group_id), new_name)
-        task = ScheduleTask(
-            job_id=_build_job_id("group"),
-            target_type="group",
+        task = _create_scheduled_change(
+            "group",
             target_id=int(event.group_id),
             cron=cron,
             new_name=new_name,
         )
-        add_job(task)
     except ValueError as exception:
         await group_schedule_name.finish(str(exception))
     except Exception as exception:
@@ -648,13 +711,10 @@ async def bot_modify_avatar_handler(
 
         image_path = await _parse_avatar_payload(arg)
         _ensure_avatar_resource_available("self", None, image_path)
-        task = ScheduleTask(
-            job_id=_build_job_id("self"),
-            target_type="self",
-            cron="0 0 1 1 *",
+        success, message = await _run_immediate_change(
+            "self",
             image_path=image_path,
         )
-        success, message = await run_task_now(task)
         if not success:
             await bot_modify_avatar.finish(f"立即修改头像失败: {message}")
     except ValueError as exception:
@@ -675,13 +735,10 @@ async def bot_modify_name_handler(
 
         new_name = await _parse_name_payload(arg)
         _ensure_name_resource_available("self", None, new_name)
-        task = ScheduleTask(
-            job_id=_build_job_id("self"),
-            target_type="self",
-            cron="0 0 1 1 *",
+        success, message = await _run_immediate_change(
+            "self",
             new_name=new_name,
         )
-        success, message = await run_task_now(task)
         if not success:
             await bot_modify_name.finish(f"立即修改名称失败: {message}")
     except ValueError as exception:
@@ -702,13 +759,11 @@ async def bot_schedule_avatar_handler(
 
         cron, image_path = await _parse_timed_avatar_payload(arg)
         _ensure_avatar_resource_available("self", None, image_path)
-        task = ScheduleTask(
-            job_id=_build_job_id("self"),
-            target_type="self",
+        task = _create_scheduled_change(
+            "self",
             cron=cron,
             image_path=image_path,
         )
-        add_job(task)
     except ValueError as exception:
         await bot_schedule_avatar.finish(str(exception))
     except Exception as exception:
@@ -727,13 +782,11 @@ async def bot_schedule_name_handler(
 
         cron, new_name = await _parse_timed_name_payload(arg)
         _ensure_name_resource_available("self", None, new_name)
-        task = ScheduleTask(
-            job_id=_build_job_id("self"),
-            target_type="self",
+        task = _create_scheduled_change(
+            "self",
             cron=cron,
             new_name=new_name,
         )
-        add_job(task)
     except ValueError as exception:
         await bot_schedule_name.finish(str(exception))
     except Exception as exception:
@@ -746,13 +799,11 @@ async def bot_schedule_name_handler(
 async def schedule_list_handler(
     event: PrivateMessageEvent | GroupMessageEvent, bot: Bot, arg=CommandArg()
 ) -> None:
-    filtered_tasks = list(tasks.values())
-    if isinstance(event, GroupMessageEvent):
-        filtered_tasks = [
-            task
-            for task in filtered_tasks
-            if task.target_type == "group" and task.target_id == int(event.group_id)
-        ]
+    filtered_tasks = (
+        list_tasks(target_type="group", target_id=int(event.group_id))
+        if isinstance(event, GroupMessageEvent)
+        else list_tasks()
+    )
 
     if not filtered_tasks:
         await schedule_list.finish("当前没有定时任务")
@@ -855,7 +906,7 @@ async def random_avatar_handler(event: GroupMessageEvent, bot: Bot) -> None:
         job_id=_build_job_id("group"),
         target_type="group",
         target_id=int(event.group_id),
-        cron="0 0 1 1 *",
+        cron=IMMEDIATE_TASK_CRON,
         image_path=image_path,
     )
     success, message = await run_task_now(task)
@@ -880,7 +931,7 @@ async def random_name_handler(event: GroupMessageEvent, bot: Bot) -> None:
         job_id=_build_job_id("group"),
         target_type="group",
         target_id=int(event.group_id),
-        cron="0 0 1 1 *",
+        cron=IMMEDIATE_TASK_CRON,
         new_name=name_value,
     )
     success, message = await run_task_now(task)
