@@ -10,14 +10,20 @@ from nonebot.adapters.onebot.v11 import (
     PrivateMessageEvent,
 )
 from nonebot.adapters.onebot.v11.permission import GROUP_ADMIN, GROUP_OWNER
-from nonebot.params import CommandArg
+from nonebot.params import Arg, CommandArg
 from nonebot.permission import SUPERUSER
 from nonebot.rule import Rule
 
 from .config import Config
 from .models import ScheduleTask
+from .resources import (
+    classify_source_token,
+    has_uploaded_avatars,
+    has_uploaded_names,
+    save_uploaded_image,
+    save_uploaded_name,
+)
 from .scheduler import add_job, remove_job, run_task_now, tasks
-from .utils import download_image
 
 driver = get_driver()
 plugin_config = Config.model_validate(driver.config.dict())
@@ -107,6 +113,14 @@ del_schedule = on_command(
     block=True,
 )
 
+upload_resource = on_command(
+    "上传",
+    permission=GROUP_ADMIN | GROUP_OWNER,
+    rule=Rule(_group_only),
+    priority=5,
+    block=True,
+)
+
 
 def _extract_image_input(arg: Message) -> str | None:
     for segment in arg:
@@ -133,12 +147,50 @@ async def _resolve_image_value(image_input: str | None) -> str | None:
         return None
 
     if image_input.startswith(("http://", "https://")):
-        downloaded_path = await download_image(image_input)
-        if downloaded_path is None:
-            raise ValueError("图片下载失败")
-        return str(downloaded_path)
+        return image_input
 
-    return image_input
+    local_path = Path(image_input)
+    if local_path.exists():
+        return str(local_path)
+
+    raise ValueError("图片资源不存在")
+
+
+async def _parse_resource_sources(
+    image_input: str | None,
+    parts: list[str],
+) -> tuple[str | None, str | None]:
+    image_source = await _resolve_image_value(image_input)
+    name_source: str | None = None
+
+    index = 0
+    while index < len(parts):
+        token = parts[index]
+        token_type = await classify_source_token(token)
+
+        if token_type in {"avatar", "avatar_collection", "avatar_manifest"}:
+            if image_source is not None:
+                raise ValueError("头像来源只能提供一个图片、目录或图片清单")
+            image_source = await _resolve_image_value(token)
+            index += 1
+            continue
+
+        if token_type == "name_manifest":
+            if name_source is not None:
+                raise ValueError("名称来源只能提供一个名称清单或纯文本名称")
+            name_source = token
+            index += 1
+            continue
+
+        break
+
+    plain_name = " ".join(parts[index:]).strip()
+    if plain_name:
+        if name_source is not None:
+            raise ValueError("名称来源只能提供一个名称清单或纯文本名称")
+        name_source = plain_name
+
+    return image_source, name_source
 
 
 async def _parse_modify_payload(arg: Message) -> tuple[str | None, str | None]:
@@ -146,15 +198,7 @@ async def _parse_modify_payload(arg: Message) -> tuple[str | None, str | None]:
     parts = shlex.split(plain_text) if plain_text else []
 
     image_input = _extract_image_input(arg)
-    if image_input is None and parts and _looks_like_url(parts[0]):
-        image_input = parts.pop(0)
-
-    image_path_value = await _resolve_image_value(image_input)
-    new_name = " ".join(parts).strip() or None
-    if image_path_value is None and new_name is None:
-        raise ValueError("至少提供头像图片或新名称之一")
-
-    return image_path_value, new_name
+    return await _parse_resource_sources(image_input, parts)
 
 
 async def _parse_timed_modify_payload(arg: Message) -> tuple[str, str | None, str | None]:
@@ -170,15 +214,29 @@ async def _parse_timed_modify_payload(arg: Message) -> tuple[str, str | None, st
     payload_parts = parts[5:]
 
     image_input = _extract_image_input(arg)
-    if image_input is None and payload_parts and _looks_like_url(payload_parts[0]):
-        image_input = payload_parts.pop(0)
-
-    image_path_value = await _resolve_image_value(image_input)
-    new_name = " ".join(payload_parts).strip() or None
-    if image_path_value is None and new_name is None:
-        raise ValueError("至少提供头像图片或新名称之一")
-
+    image_path_value, new_name = await _parse_resource_sources(
+        image_input,
+        payload_parts,
+    )
     return cron, image_path_value, new_name
+
+
+def _ensure_resource_available(
+    target_type: str,
+    target_id: int | None,
+    image_source: str | None,
+    name_source: str | None,
+) -> None:
+    if image_source is not None or name_source is not None:
+        return
+
+    if has_uploaded_avatars(target_type, target_id) or has_uploaded_names(
+        target_type,
+        target_id,
+    ):
+        return
+
+    raise ValueError("至少提供头像图片、新名称，或先使用上传命令保存资源")
 
 
 @avatar_help.handle()
@@ -196,14 +254,19 @@ async def avatar_help_handler(
 - 定时修改
 - bot修改
 - bot定时修改
+- 上传
 - 定时列表 / schedule_list
 - 删除定时 / del_schedule
 
 示例:
 - 群聊中发送：修改 https://example.com/avatar.jpg
+- 群聊中发送：修改 https://example.com/avatar-list.txt
+- 群聊中发送：修改 names.txt
+- 群聊中发送：修改 avatars.txt names.txt
 - 群聊中发送：修改 example
 - 群聊中发送：修改 https://example.com/avatar.jpg example
-- 群聊中发送：定时修改 0 8 * * * https://example.com/avatar.jpg
+- 群聊中发送：定时修改 0 8 * * * https://example.com/avatar-list.txt names.txt
+- 群聊中发送：上传
 - 私聊或群聊中超级管理员发送：bot修改 https://example.com/avatar.jpg
 - 私聊或群聊中超级管理员发送：bot定时修改 0 8 * * * https://example.com/avatar.jpg
 
@@ -213,6 +276,7 @@ async def avatar_help_handler(
 
 注意:
 - 具体 API 可用性取决于你使用的 OneBot V11 实现。
+- 图片清单 txt 与名称清单 txt 会在执行前重新读取，并与本群已上传资源合并。
 """.strip()
     await avatar_help.finish(help_text)
 
@@ -286,6 +350,7 @@ async def group_modify_handler(
             await group_modify.finish("当前未启用群头像/群名称修改功能")
 
         image_path, new_name = await _parse_modify_payload(arg)
+        _ensure_resource_available("group", int(event.group_id), image_path, new_name)
         task = ScheduleTask(
             job_id=_build_job_id("group"),
             target_type="group",
@@ -314,6 +379,7 @@ async def group_schedule_handler(
             await group_schedule.finish("当前未启用群头像/群名称修改功能")
 
         cron, image_path, new_name = await _parse_timed_modify_payload(arg)
+        _ensure_resource_available("group", int(event.group_id), image_path, new_name)
         task = ScheduleTask(
             job_id=_build_job_id("group"),
             target_type="group",
@@ -340,6 +406,7 @@ async def bot_modify_handler(
             await bot_modify.finish("当前未启用机器人自身头像/昵称修改功能")
 
         image_path, new_name = await _parse_modify_payload(arg)
+        _ensure_resource_available("self", None, image_path, new_name)
         task = ScheduleTask(
             job_id=_build_job_id("self"),
             target_type="self",
@@ -367,6 +434,7 @@ async def bot_schedule_handler(
             await bot_schedule.finish("当前未启用机器人自身头像/昵称修改功能")
 
         cron, image_path, new_name = await _parse_timed_modify_payload(arg)
+        _ensure_resource_available("self", None, image_path, new_name)
         task = ScheduleTask(
             job_id=_build_job_id("self"),
             target_type="self",
@@ -436,3 +504,43 @@ async def del_schedule_handler(
         await del_schedule.finish(f"未找到任务 ID: {job_id}")
 
     await del_schedule.finish(f"已删除定时任务 ID: {job_id}")
+
+
+@upload_resource.handle()
+async def upload_resource_handler(event: GroupMessageEvent) -> None:
+    await upload_resource.send(
+        "请发送下一条消息：图片会保存为头像资源，纯文本会保存为名称资源"
+    )
+
+
+@upload_resource.got("resource", prompt="请发送图片或文本消息")
+async def upload_resource_receive_handler(
+    event: GroupMessageEvent,
+    resource: Message = Arg("resource"),
+) -> None:
+    image_input = _extract_image_input(resource)
+    if image_input is not None:
+        try:
+            saved_path = await save_uploaded_image(
+                "group",
+                int(event.group_id),
+                image_input,
+            )
+        except ValueError as exception:
+            await upload_resource.finish(str(exception))
+
+        await upload_resource.finish(f"已保存头像资源: {saved_path.name}")
+
+    text = resource.extract_plain_text().strip()
+    if not text:
+        await upload_resource.reject("未识别到图片或文本，请重新发送")
+
+    try:
+        is_new_name = save_uploaded_name("group", int(event.group_id), text)
+    except ValueError as exception:
+        await upload_resource.finish(str(exception))
+
+    if is_new_name:
+        await upload_resource.finish(f"已保存名称资源: {text}")
+
+    await upload_resource.finish(f"名称资源已存在: {text}")

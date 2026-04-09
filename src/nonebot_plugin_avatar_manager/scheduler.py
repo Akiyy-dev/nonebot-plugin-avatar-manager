@@ -9,6 +9,7 @@ from nonebot.exception import ActionFailed
 from nonebot_plugin_apscheduler import scheduler
 
 from .models import ScheduleTask
+from .resources import resolve_avatar_resource, resolve_name_resource
 from .utils import TEMP_DIR, image_to_base64
 
 tasks: dict[str, ScheduleTask] = {}
@@ -78,24 +79,44 @@ async def _resolve_bot() -> Bot | None:
     return bot
 
 
-async def change_avatar_job(task: ScheduleTask, bot: Bot) -> tuple[bool, str]:
+async def change_avatar_job(
+    task: ScheduleTask,
+    bot: Bot,
+    *,
+    scheduled: bool,
+) -> tuple[bool, str]:
     try:
+        resolved_image_path = await resolve_avatar_resource(
+            task.image_path,
+            task.target_type,
+            task.target_id,
+            scheduled,
+        )
+        resolved_name = await resolve_name_resource(
+            task.new_name,
+            task.target_type,
+            task.target_id,
+            scheduled,
+        )
+        if resolved_image_path is None and resolved_name is None:
+            return False, "没有可用的头像或名称资源"
+
         upload_payload: str | None = None
-        if task.image_path:
-            image_path = Path(task.image_path)
+        if resolved_image_path:
+            image_path = Path(resolved_image_path)
             if image_path.exists():
                 base64_str = await image_to_base64(image_path)
                 upload_payload = f"base64://{base64_str}"
             else:
-                message = f"任务 {task.job_id} 的图片不存在: {task.image_path}"
+                message = f"任务 {task.job_id} 的图片不存在: {resolved_image_path}"
                 logger.warning(message)
                 return False, message
 
         if task.target_type == "self":
             if upload_payload is not None:
                 await bot.call_api("set_qq_avatar", file=upload_payload)
-            if task.new_name:
-                await bot.call_api("set_qq_profile", nickname=task.new_name)
+            if resolved_name:
+                await bot.call_api("set_qq_profile", nickname=resolved_name)
         elif task.target_type == "group" and task.target_id is not None:
             if upload_payload is not None:
                 await bot.call_api(
@@ -103,11 +124,11 @@ async def change_avatar_job(task: ScheduleTask, bot: Bot) -> tuple[bool, str]:
                     group_id=task.target_id,
                     file=upload_payload,
                 )
-            if task.new_name:
+            if resolved_name:
                 await bot.call_api(
                     "set_group_name",
                     group_id=task.target_id,
-                    group_name=task.new_name,
+                    group_name=resolved_name,
                 )
         else:
             message = f"任务 {task.job_id} 的目标配置无效，已跳过执行"
@@ -137,7 +158,7 @@ async def _run_task(job_id: str) -> None:
     if bot is None:
         return
 
-    await change_avatar_job(task, bot)
+    await change_avatar_job(task, bot, scheduled=True)
 
 
 async def run_task_now(task: ScheduleTask) -> tuple[bool, str]:
@@ -145,7 +166,7 @@ async def run_task_now(task: ScheduleTask) -> tuple[bool, str]:
     if bot is None:
         return False, "当前没有可用的 OneBot V11 Bot"
 
-    return await change_avatar_job(task, bot)
+    return await change_avatar_job(task, bot, scheduled=False)
 
 
 def add_job(task: ScheduleTask) -> None:
