@@ -18,6 +18,9 @@ from .config import Config
 from .models import ScheduleTask
 from .resources import (
     classify_source_token,
+    delete_local_storage_item,
+    get_local_storage_page,
+    get_local_storage_summary,
     has_uploaded_avatars,
     has_uploaded_names,
     resolve_avatar_resource,
@@ -133,6 +136,24 @@ random_avatar = on_command(
 
 random_name = on_command(
     "随机名称",
+    permission=GROUP_ADMIN | GROUP_OWNER,
+    rule=Rule(_group_only),
+    priority=5,
+    block=True,
+)
+
+local_storage_list = on_command(
+    "本地存储列表",
+    aliases={"存储列表"},
+    permission=GROUP_ADMIN | GROUP_OWNER,
+    rule=Rule(_group_only),
+    priority=5,
+    block=True,
+)
+
+delete_local_storage = on_command(
+    "删除本地存储项",
+    aliases={"删除存储项"},
     permission=GROUP_ADMIN | GROUP_OWNER,
     rule=Rule(_group_only),
     priority=5,
@@ -257,6 +278,65 @@ def _ensure_resource_available(
     raise ValueError("至少提供头像图片、新名称，或先使用上传命令保存资源")
 
 
+def _parse_storage_list_args(arg: Message) -> tuple[str | None, int]:
+    plain_text = arg.extract_plain_text().strip()
+    if not plain_text:
+        return None, 1
+
+    parts = shlex.split(plain_text)
+    kind_value = parts[0]
+    kind_mapping = {
+        "头像": "avatar",
+        "名称": "name",
+        "avatar": "avatar",
+        "name": "name",
+    }
+    kind = kind_mapping.get(kind_value)
+    if kind is None:
+        raise ValueError("请使用：本地存储列表 [头像|名称] [页码]")
+
+    if len(parts) == 1:
+        return kind, 1
+    if len(parts) > 2:
+        raise ValueError("参数过多，请使用：本地存储列表 [头像|名称] [页码]")
+
+    if not parts[1].isdigit():
+        raise ValueError("页码必须为正整数")
+
+    page = int(parts[1])
+    if page < 1:
+        raise ValueError("页码必须大于等于 1")
+    return kind, page
+
+
+def _parse_storage_delete_args(arg: Message) -> tuple[str, int]:
+    plain_text = arg.extract_plain_text().strip()
+    if not plain_text:
+        raise ValueError("请使用：删除本地存储项 [头像|名称] [序号]")
+
+    parts = shlex.split(plain_text)
+    if len(parts) != 2:
+        raise ValueError("请使用：删除本地存储项 [头像|名称] [序号]")
+
+    kind_mapping = {
+        "头像": "avatar",
+        "名称": "name",
+        "avatar": "avatar",
+        "name": "name",
+    }
+    kind = kind_mapping.get(parts[0])
+    if kind is None:
+        raise ValueError("请使用：删除本地存储项 [头像|名称] [序号]")
+
+    if not parts[1].isdigit():
+        raise ValueError("序号必须为正整数")
+
+    index = int(parts[1])
+    if index < 1:
+        raise ValueError("序号必须大于等于 1")
+    return kind, index
+
+
 @avatar_help.handle()
 async def avatar_help_handler(
     event: PrivateMessageEvent | GroupMessageEvent, bot: Bot, arg=CommandArg()
@@ -275,6 +355,8 @@ async def avatar_help_handler(
 - 上传
 - 随机头像
 - 随机名称
+- 本地存储列表
+- 删除本地存储项
 - 定时列表 / schedule_list
 - 删除定时 / del_schedule
 
@@ -290,6 +372,11 @@ async def avatar_help_handler(
 - 群聊中发送：取消
 - 群聊中发送：随机头像
 - 群聊中发送：随机名称
+- 群聊中发送：本地存储列表
+- 群聊中发送：本地存储列表 头像 2
+- 群聊中发送：本地存储列表 名称 1
+- 群聊中发送：删除本地存储项 头像 3
+- 群聊中发送：删除本地存储项 名称 2
 - 私聊或群聊中超级管理员发送：bot修改 https://example.com/avatar.jpg
 - 私聊或群聊中超级管理员发送：bot定时修改 0 8 * * * https://example.com/avatar.jpg
 
@@ -301,6 +388,8 @@ async def avatar_help_handler(
 - 具体 API 可用性取决于你使用的 OneBot V11 实现。
 - 图片清单 txt 与名称清单 txt 会在执行前重新读取，并与本群已上传资源合并。
 - 上传图片会保存到 data 中，并写入本群本地存储列表。
+- 本地存储列表支持分页查看，适合头像资源较多时逐页检查。
+- 删除本地存储项使用列表中显示的全局序号，而不是页内序号。
 """.strip()
     await avatar_help.finish(help_text)
 
@@ -621,3 +710,70 @@ async def random_name_handler(event: GroupMessageEvent, bot: Bot) -> None:
         await random_name.finish(f"随机更换名称失败: {message}")
 
     await random_name.finish("已从本地存储列表中随机更换当前群名称")
+
+
+@local_storage_list.handle()
+async def local_storage_list_handler(
+    event: GroupMessageEvent,
+    arg=CommandArg(),
+) -> None:
+    try:
+        kind, page = _parse_storage_list_args(arg)
+        if kind is None:
+            summary = get_local_storage_summary("group", int(event.group_id))
+            message = (
+                "本地存储列表摘要\n"
+                f"- 头像资源数量: {summary['avatar_count']}\n"
+                f"- 名称资源数量: {summary['name_count']}\n"
+                "用法:\n"
+                "- 本地存储列表 头像 1\n"
+                "- 本地存储列表 名称 1"
+            )
+            await local_storage_list.finish(message)
+
+        items, total, total_pages, start_index = get_local_storage_page(
+            "group",
+            int(event.group_id),
+            kind,
+            page,
+        )
+    except ValueError as exception:
+        await local_storage_list.finish(str(exception))
+
+    if not items:
+        title = "头像" if kind == "avatar" else "名称"
+        await local_storage_list.finish(f"当前本地存储列表中没有{title}资源")
+
+    title = "头像" if kind == "avatar" else "名称"
+    lines = [
+        f"本地{title}存储列表 第 {page}/{total_pages} 页，共 {total} 项",
+    ]
+    for offset, item in enumerate(items, start=1):
+        lines.append(f"{start_index + offset}. {item}")
+
+    if page < total_pages:
+        lines.append(f"下一页: 本地存储列表 {title} {page + 1}")
+
+    await local_storage_list.finish("\n".join(lines))
+
+
+@delete_local_storage.handle()
+async def delete_local_storage_handler(
+    event: GroupMessageEvent,
+    arg=CommandArg(),
+) -> None:
+    try:
+        kind, index = _parse_storage_delete_args(arg)
+        removed_value = delete_local_storage_item(
+            "group",
+            int(event.group_id),
+            kind,
+            index,
+        )
+    except ValueError as exception:
+        await delete_local_storage.finish(str(exception))
+
+    title = "头像" if kind == "avatar" else "名称"
+    await delete_local_storage.finish(
+        f"已删除本地{title}存储项 #{index}: {removed_value}"
+    )

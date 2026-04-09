@@ -24,6 +24,8 @@ MAX_NAME_LENGTH = 128
 MAX_IMAGE_WIDTH = 4096
 MAX_IMAGE_HEIGHT = 4096
 MAX_IMAGE_PIXELS = 4096 * 4096
+AVATAR_LIST_PAGE_SIZE = 15
+NAME_LIST_PAGE_SIZE = 20
 
 _selection_state: dict[str, dict[str, list[str]]] | None = None
 
@@ -89,6 +91,22 @@ def _save_selection_state() -> None:
         )
     except OSError as exception:
         logger.warning(f"保存资源状态失败: {exception}")
+
+
+def _prune_selection_history(target_key: str, kind: str, removed_value: str) -> None:
+    state = _load_selection_state()
+    target_state = state.get(target_key)
+    if target_state is None:
+        return
+
+    history_key = f"{kind}_history"
+    history = target_state.get(history_key, [])
+    filtered_history = [item for item in history if item != removed_value]
+    if filtered_history == history:
+        return
+
+    target_state[history_key] = filtered_history
+    _save_selection_state()
 
 
 def _is_remote_url(value: str) -> bool:
@@ -193,6 +211,16 @@ def _append_line(path: Path, value: str) -> None:
             file.write(value + "\n")
     except OSError as exception:
         raise ValueError(f"保存存储列表失败: {exception}") from exception
+
+
+def _rewrite_lines(path: Path, values: list[str]) -> None:
+    try:
+        path.write_text("\n".join(values), encoding="utf-8")
+        if values:
+            with path.open("a", encoding="utf-8") as file:
+                file.write("\n")
+    except OSError as exception:
+        raise ValueError(f"更新存储列表失败: {exception}") from exception
 
 
 def has_uploaded_avatars(target_type: str, target_id: int | None) -> bool:
@@ -440,6 +468,96 @@ def _list_uploaded_images(target_key: str) -> list[str]:
 def _list_uploaded_names(target_key: str) -> list[str]:
     paths = _ensure_target_paths(target_key)
     return _read_lines(paths["uploaded_names_file"])
+
+
+def get_local_storage_summary(
+    target_type: str,
+    target_id: int | None,
+) -> dict[str, int]:
+    target_key = build_target_key(target_type, target_id)
+    return {
+        "avatar_count": len(_list_uploaded_images(target_key)),
+        "name_count": len(_list_uploaded_names(target_key)),
+    }
+
+
+def get_local_storage_page(
+    target_type: str,
+    target_id: int | None,
+    kind: str,
+    page: int,
+) -> tuple[list[str], int, int, int]:
+    if page < 1:
+        raise ValueError("页码必须大于等于 1")
+
+    target_key = build_target_key(target_type, target_id)
+    if kind == "avatar":
+        all_items = [Path(item).name for item in _list_uploaded_images(target_key)]
+        page_size = AVATAR_LIST_PAGE_SIZE
+    elif kind == "name":
+        all_items = _list_uploaded_names(target_key)
+        page_size = NAME_LIST_PAGE_SIZE
+    else:
+        raise ValueError("不支持的存储列表类型")
+
+    total = len(all_items)
+    total_pages = max((total + page_size - 1) // page_size, 1)
+    if total and page > total_pages:
+        raise ValueError(f"页码超出范围，当前最大页码为 {total_pages}")
+
+    start_index = (page - 1) * page_size
+    page_items = all_items[start_index : start_index + page_size]
+    return page_items, total, total_pages, start_index
+
+
+def delete_local_storage_item(
+    target_type: str,
+    target_id: int | None,
+    kind: str,
+    index: int,
+) -> str:
+    if index < 1:
+        raise ValueError("序号必须大于等于 1")
+
+    target_key = build_target_key(target_type, target_id)
+    paths = _ensure_target_paths(target_key)
+
+    if kind == "avatar":
+        all_items = _list_uploaded_images(target_key)
+        if index > len(all_items):
+            raise ValueError(f"头像序号超出范围，当前最大序号为 {len(all_items)}")
+
+        removed_value = all_items[index - 1]
+        removed_name = Path(removed_value).name
+        remaining_list = [
+            item
+            for item in _read_lines(paths["uploaded_avatar_list_file"])
+            if item != removed_value and Path(item).exists()
+        ]
+        _rewrite_lines(paths["uploaded_avatar_list_file"], remaining_list)
+
+        removed_path = Path(removed_value)
+        if removed_path.exists():
+            try:
+                removed_path.unlink()
+            except OSError as exception:
+                raise ValueError(f"删除头像文件失败: {exception}") from exception
+
+        _prune_selection_history(target_key, "avatar", removed_value)
+        return removed_name
+
+    if kind == "name":
+        all_items = _list_uploaded_names(target_key)
+        if index > len(all_items):
+            raise ValueError(f"名称序号超出范围，当前最大序号为 {len(all_items)}")
+
+        removed_value = all_items[index - 1]
+        remaining_list = [item for item in all_items if item != removed_value]
+        _rewrite_lines(paths["uploaded_names_file"], remaining_list)
+        _prune_selection_history(target_key, "name", removed_value)
+        return removed_value
+
+    raise ValueError("不支持的存储列表类型")
 
 
 async def _prepare_remote_single_image(source: str, target_key: str) -> str:
