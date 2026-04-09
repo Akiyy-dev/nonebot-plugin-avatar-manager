@@ -28,6 +28,37 @@ jobs:
         if: steps.version.outputs.VERSION != steps.version.outputs.TAG_VERSION
         run: exit 1
 
+      - name: Build Package
+        run: |
+          rm -rf dist
+          pdm build
+
+      - name: Validate Built Package
+        run: |
+          python -m venv .release-venv
+          source .release-venv/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install dist/*.whl
+          python - <<'PY'
+          import importlib.metadata as metadata
+          import importlib.util
+
+          module_name = "nonebot_plugin_avatar_manager"
+          spec = importlib.util.find_spec(module_name)
+          if spec is None:
+              raise SystemExit(f"missing module: {module_name}")
+
+          entry_points = metadata.entry_points(group="nonebot.plugin")
+          if not any(
+              entry_point.name == module_name
+              and entry_point.value == module_name
+              for entry_point in entry_points
+          ):
+              raise SystemExit(f"missing nonebot entry point: {module_name}")
+
+          print("package validation passed")
+          PY
+
       - name: Publish Package
         run: |
           pdm publish
