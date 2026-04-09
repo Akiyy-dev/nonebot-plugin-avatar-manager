@@ -72,31 +72,61 @@ group_manage = on_command(
     block=True,
 )
 
-group_modify = on_command(
-    "修改",
+group_modify_avatar = on_command(
+    "修改头像",
     permission=GROUP_ADMIN | GROUP_OWNER,
     rule=Rule(_group_only),
     priority=5,
     block=True,
 )
 
-group_schedule = on_command(
-    "定时修改",
+group_modify_name = on_command(
+    "修改名称",
     permission=GROUP_ADMIN | GROUP_OWNER,
     rule=Rule(_group_only),
     priority=5,
     block=True,
 )
 
-bot_modify = on_command(
-    "bot修改",
+group_schedule_avatar = on_command(
+    "定时修改头像",
+    permission=GROUP_ADMIN | GROUP_OWNER,
+    rule=Rule(_group_only),
+    priority=5,
+    block=True,
+)
+
+group_schedule_name = on_command(
+    "定时修改名称",
+    permission=GROUP_ADMIN | GROUP_OWNER,
+    rule=Rule(_group_only),
+    priority=5,
+    block=True,
+)
+
+bot_modify_avatar = on_command(
+    "bot修改头像",
     permission=SUPERUSER,
     priority=5,
     block=True,
 )
 
-bot_schedule = on_command(
-    "bot定时修改",
+bot_modify_name = on_command(
+    "bot修改名称",
+    permission=SUPERUSER,
+    priority=5,
+    block=True,
+)
+
+bot_schedule_avatar = on_command(
+    "bot定时修改头像",
+    permission=SUPERUSER,
+    priority=5,
+    block=True,
+)
+
+bot_schedule_name = on_command(
+    "bot定时修改名称",
     permission=SUPERUSER,
     priority=5,
     block=True,
@@ -195,52 +225,47 @@ async def _resolve_image_value(image_input: str | None) -> str | None:
     raise ValueError("图片资源不存在")
 
 
-async def _parse_resource_sources(
-    image_input: str | None,
-    parts: list[str],
-) -> tuple[str | None, str | None]:
-    image_source = await _resolve_image_value(image_input)
-    name_source: str | None = None
-
-    index = 0
-    while index < len(parts):
-        token = parts[index]
-        token_type = await classify_source_token(token)
-
-        if token_type in {"avatar", "avatar_collection", "avatar_manifest"}:
-            if image_source is not None:
-                raise ValueError("头像来源只能提供一个图片、目录或图片清单")
-            image_source = await _resolve_image_value(token)
-            index += 1
-            continue
-
-        if token_type == "name_manifest":
-            if name_source is not None:
-                raise ValueError("名称来源只能提供一个名称清单或纯文本名称")
-            name_source = token
-            index += 1
-            continue
-
-        break
-
-    plain_name = " ".join(parts[index:]).strip()
-    if plain_name:
-        if name_source is not None:
-            raise ValueError("名称来源只能提供一个名称清单或纯文本名称")
-        name_source = plain_name
-
-    return image_source, name_source
-
-
-async def _parse_modify_payload(arg: Message) -> tuple[str | None, str | None]:
+async def _parse_avatar_payload(arg: Message) -> str | None:
     plain_text = arg.extract_plain_text().strip()
     parts = shlex.split(plain_text) if plain_text else []
-
     image_input = _extract_image_input(arg)
-    return await _parse_resource_sources(image_input, parts)
+    if image_input is not None:
+        if parts:
+            raise ValueError("修改头像命令仅支持一个图片、目录或图片清单参数")
+        return await _resolve_image_value(image_input)
+
+    if not parts:
+        return None
+    if len(parts) != 1:
+        raise ValueError("修改头像命令仅支持一个图片、目录或图片清单参数")
+
+    token_type = await classify_source_token(parts[0])
+    if token_type not in {"avatar", "avatar_collection", "avatar_manifest"}:
+        raise ValueError("请提供图片、目录或图片清单作为头像来源")
+
+    return await _resolve_image_value(parts[0])
 
 
-async def _parse_timed_modify_payload(arg: Message) -> tuple[str, str | None, str | None]:
+async def _parse_name_payload(arg: Message) -> str | None:
+    if _extract_image_input(arg) is not None:
+        raise ValueError("修改名称命令不支持图片消息")
+
+    plain_text = arg.extract_plain_text().strip()
+    if not plain_text:
+        return None
+
+    parts = shlex.split(plain_text)
+    if len(parts) == 1:
+        token_type = await classify_source_token(parts[0])
+        if token_type == "name_manifest":
+            return parts[0]
+        if token_type in {"avatar", "avatar_collection", "avatar_manifest"}:
+            raise ValueError("请提供名称文本或名称清单作为名称来源")
+
+    return plain_text
+
+
+async def _parse_timed_avatar_payload(arg: Message) -> tuple[str, str | None]:
     plain_text = arg.extract_plain_text().strip()
     if not plain_text:
         raise ValueError("参数不能为空")
@@ -253,29 +278,75 @@ async def _parse_timed_modify_payload(arg: Message) -> tuple[str, str | None, st
     payload_parts = parts[5:]
 
     image_input = _extract_image_input(arg)
-    image_path_value, new_name = await _parse_resource_sources(
-        image_input,
-        payload_parts,
-    )
-    return cron, image_path_value, new_name
+    if image_input is not None:
+        return cron, await _resolve_image_value(image_input)
+
+    payload_text = " ".join(payload_parts).strip()
+    if not payload_text:
+        return cron, None
+    if len(payload_parts) != 1:
+        raise ValueError("定时修改头像命令仅支持一个图片、目录或图片清单参数")
+
+    token_type = await classify_source_token(payload_parts[0])
+    if token_type not in {"avatar", "avatar_collection", "avatar_manifest"}:
+        raise ValueError("请提供图片、目录或图片清单作为头像来源")
+    return cron, await _resolve_image_value(payload_parts[0])
 
 
-def _ensure_resource_available(
+async def _parse_timed_name_payload(arg: Message) -> tuple[str, str | None]:
+    if _extract_image_input(arg) is not None:
+        raise ValueError("定时修改名称命令不支持图片消息")
+
+    plain_text = arg.extract_plain_text().strip()
+    if not plain_text:
+        raise ValueError("参数不能为空")
+
+    parts = shlex.split(plain_text)
+    if len(parts) < 5:
+        raise ValueError("cron 格式错误，需要 5 段表达式")
+
+    cron = " ".join(parts[:5])
+    payload_parts = parts[5:]
+    payload_text = " ".join(payload_parts).strip()
+    if not payload_text:
+        return cron, None
+
+    if len(payload_parts) == 1:
+        token_type = await classify_source_token(payload_parts[0])
+        if token_type == "name_manifest":
+            return cron, payload_parts[0]
+        if token_type in {"avatar", "avatar_collection", "avatar_manifest"}:
+            raise ValueError("请提供名称文本或名称清单作为名称来源")
+
+    return cron, payload_text
+
+
+def _ensure_avatar_resource_available(
     target_type: str,
     target_id: int | None,
     image_source: str | None,
+) -> None:
+    if image_source is not None:
+        return
+
+    if has_uploaded_avatars(target_type, target_id):
+        return
+
+    raise ValueError("至少提供头像图片，或先使用上传命令保存头像资源")
+
+
+def _ensure_name_resource_available(
+    target_type: str,
+    target_id: int | None,
     name_source: str | None,
 ) -> None:
-    if image_source is not None or name_source is not None:
+    if name_source is not None:
         return
 
-    if has_uploaded_avatars(target_type, target_id) or has_uploaded_names(
-        target_type,
-        target_id,
-    ):
+    if has_uploaded_names(target_type, target_id):
         return
 
-    raise ValueError("至少提供头像图片、新名称，或先使用上传命令保存资源")
+    raise ValueError("至少提供名称文本，或先使用上传命令保存名称资源")
 
 
 def _parse_storage_list_args(arg: Message) -> tuple[str | None, int]:
@@ -348,10 +419,14 @@ async def avatar_help_handler(
 - 头像帮助 / avatar_help
 - 头像信息 / avatar_info
 - 群管
-- 修改
-- 定时修改
-- bot修改
-- bot定时修改
+- 修改头像
+- 修改名称
+- 定时修改头像
+- 定时修改名称
+- bot修改头像
+- bot修改名称
+- bot定时修改头像
+- bot定时修改名称
 - 上传
 - 随机头像
 - 随机名称
@@ -361,13 +436,12 @@ async def avatar_help_handler(
 - 删除定时 / del_schedule
 
 示例:
-- 群聊中发送：修改 https://example.com/avatar.jpg
-- 群聊中发送：修改 https://example.com/avatar_list.txt
-- 群聊中发送：修改 name_list.txt
-- 群聊中发送：修改 avatar_list.txt name_list.txt
-- 群聊中发送：修改 example
-- 群聊中发送：修改 https://example.com/avatar.jpg example
-- 群聊中发送：定时修改 0 8 * * * https://example.com/avatar_list.txt name_list.txt
+- 群聊中发送：修改头像 https://example.com/avatar.jpg
+- 群聊中发送：修改头像 https://example.com/avatar_list.txt
+- 群聊中发送：修改名称 新群名
+- 群聊中发送：修改名称 name_list.txt
+- 群聊中发送：定时修改头像 0 8 * * * https://example.com/avatar_list.txt
+- 群聊中发送：定时修改名称 0 8 * * * name_list.txt
 - 群聊中发送：上传
 - 群聊中发送：取消
 - 群聊中发送：随机头像
@@ -377,8 +451,10 @@ async def avatar_help_handler(
 - 群聊中发送：本地存储列表 名称 1
 - 群聊中发送：删除本地存储项 头像 3
 - 群聊中发送：删除本地存储项 名称 2
-- 私聊或群聊中超级管理员发送：bot修改 https://example.com/avatar.jpg
-- 私聊或群聊中超级管理员发送：bot定时修改 0 8 * * * https://example.com/avatar.jpg
+- 私聊或群聊中超级管理员发送：bot修改头像 https://example.com/avatar.jpg
+- 私聊或群聊中超级管理员发送：bot修改名称 新昵称
+- 私聊或群聊中超级管理员发送：bot定时修改头像 0 8 * * * https://example.com/avatar_list.txt
+- 私聊或群聊中超级管理员发送：bot定时修改名称 0 8 * * * name_list.txt
 
 权限说明:
 - 私聊中：仅超级管理员可操作全部目标
@@ -454,114 +530,216 @@ async def group_manage_handler(
     await group_manage.finish("可管理群列表:\n" + "\n".join(manageable_groups))
 
 
-@group_modify.handle()
-async def group_modify_handler(
+@group_modify_avatar.handle()
+async def group_modify_avatar_handler(
     event: GroupMessageEvent, bot: Bot, arg=CommandArg()
 ) -> None:
     try:
         if not plugin_config.enable_group_avatar:
-            await group_modify.finish("当前未启用群头像/群名称修改功能")
+            await group_modify_avatar.finish("当前未启用群头像修改功能")
 
-        image_path, new_name = await _parse_modify_payload(arg)
-        _ensure_resource_available("group", int(event.group_id), image_path, new_name)
+        image_path = await _parse_avatar_payload(arg)
+        _ensure_avatar_resource_available("group", int(event.group_id), image_path)
+        task = ScheduleTask(
+            job_id=_build_job_id("group"),
+            target_type="group",
+            target_id=int(event.group_id),
+            cron="0 0 1 1 *",
+            image_path=image_path,
+        )
+        success, message = await run_task_now(task)
+        if not success:
+            await group_modify_avatar.finish(f"立即修改头像失败: {message}")
+    except ValueError as exception:
+        await group_modify_avatar.finish(str(exception))
+    except Exception as exception:
+        await group_modify_avatar.finish(f"立即修改头像失败: {exception}")
+
+    await group_modify_avatar.finish("已立即修改当前群头像")
+
+
+@group_modify_name.handle()
+async def group_modify_name_handler(
+    event: GroupMessageEvent, bot: Bot, arg=CommandArg()
+) -> None:
+    try:
+        if not plugin_config.enable_group_avatar:
+            await group_modify_name.finish("当前未启用群名称修改功能")
+
+        new_name = await _parse_name_payload(arg)
+        _ensure_name_resource_available("group", int(event.group_id), new_name)
         task = ScheduleTask(
             job_id=_build_job_id("group"),
             target_type="group",
             target_id=int(event.group_id),
             cron="0 0 1 1 *",
             new_name=new_name,
-            image_path=image_path,
         )
         success, message = await run_task_now(task)
         if not success:
-            await group_modify.finish(f"立即修改失败: {message}")
+            await group_modify_name.finish(f"立即修改名称失败: {message}")
     except ValueError as exception:
-        await group_modify.finish(str(exception))
+        await group_modify_name.finish(str(exception))
     except Exception as exception:
-        await group_modify.finish(f"立即修改失败: {exception}")
+        await group_modify_name.finish(f"立即修改名称失败: {exception}")
 
-    await group_modify.finish("已立即修改当前群配置")
+    await group_modify_name.finish("已立即修改当前群名称")
 
 
-@group_schedule.handle()
-async def group_schedule_handler(
+@group_schedule_avatar.handle()
+async def group_schedule_avatar_handler(
     event: GroupMessageEvent, bot: Bot, arg=CommandArg()
 ) -> None:
     try:
         if not plugin_config.enable_group_avatar:
-            await group_schedule.finish("当前未启用群头像/群名称修改功能")
+            await group_schedule_avatar.finish("当前未启用群头像修改功能")
 
-        cron, image_path, new_name = await _parse_timed_modify_payload(arg)
-        _ensure_resource_available("group", int(event.group_id), image_path, new_name)
+        cron, image_path = await _parse_timed_avatar_payload(arg)
+        _ensure_avatar_resource_available("group", int(event.group_id), image_path)
+        task = ScheduleTask(
+            job_id=_build_job_id("group"),
+            target_type="group",
+            target_id=int(event.group_id),
+            cron=cron,
+            image_path=image_path,
+        )
+        add_job(task)
+    except ValueError as exception:
+        await group_schedule_avatar.finish(str(exception))
+    except Exception as exception:
+        await group_schedule_avatar.finish(f"添加头像定时任务失败: {exception}")
+
+    await group_schedule_avatar.finish(f"已添加头像定时任务 ID: {task.job_id}")
+
+
+@group_schedule_name.handle()
+async def group_schedule_name_handler(
+    event: GroupMessageEvent, bot: Bot, arg=CommandArg()
+) -> None:
+    try:
+        if not plugin_config.enable_group_avatar:
+            await group_schedule_name.finish("当前未启用群名称修改功能")
+
+        cron, new_name = await _parse_timed_name_payload(arg)
+        _ensure_name_resource_available("group", int(event.group_id), new_name)
         task = ScheduleTask(
             job_id=_build_job_id("group"),
             target_type="group",
             target_id=int(event.group_id),
             cron=cron,
             new_name=new_name,
-            image_path=image_path,
         )
         add_job(task)
     except ValueError as exception:
-        await group_schedule.finish(str(exception))
+        await group_schedule_name.finish(str(exception))
     except Exception as exception:
-        await group_schedule.finish(f"添加定时任务失败: {exception}")
+        await group_schedule_name.finish(f"添加名称定时任务失败: {exception}")
 
-    await group_schedule.finish(f"已添加定时任务 ID: {task.job_id}")
+    await group_schedule_name.finish(f"已添加名称定时任务 ID: {task.job_id}")
 
 
-@bot_modify.handle()
-async def bot_modify_handler(
+@bot_modify_avatar.handle()
+async def bot_modify_avatar_handler(
     event: PrivateMessageEvent | GroupMessageEvent, bot: Bot, arg=CommandArg()
 ) -> None:
     try:
         if not plugin_config.enable_self_avatar:
-            await bot_modify.finish("当前未启用机器人自身头像/昵称修改功能")
+            await bot_modify_avatar.finish("当前未启用机器人自身头像修改功能")
 
-        image_path, new_name = await _parse_modify_payload(arg)
-        _ensure_resource_available("self", None, image_path, new_name)
+        image_path = await _parse_avatar_payload(arg)
+        _ensure_avatar_resource_available("self", None, image_path)
+        task = ScheduleTask(
+            job_id=_build_job_id("self"),
+            target_type="self",
+            cron="0 0 1 1 *",
+            image_path=image_path,
+        )
+        success, message = await run_task_now(task)
+        if not success:
+            await bot_modify_avatar.finish(f"立即修改头像失败: {message}")
+    except ValueError as exception:
+        await bot_modify_avatar.finish(str(exception))
+    except Exception as exception:
+        await bot_modify_avatar.finish(f"立即修改头像失败: {exception}")
+
+    await bot_modify_avatar.finish("已立即修改机器人头像")
+
+
+@bot_modify_name.handle()
+async def bot_modify_name_handler(
+    event: PrivateMessageEvent | GroupMessageEvent, bot: Bot, arg=CommandArg()
+) -> None:
+    try:
+        if not plugin_config.enable_self_avatar:
+            await bot_modify_name.finish("当前未启用机器人自身名称修改功能")
+
+        new_name = await _parse_name_payload(arg)
+        _ensure_name_resource_available("self", None, new_name)
         task = ScheduleTask(
             job_id=_build_job_id("self"),
             target_type="self",
             cron="0 0 1 1 *",
             new_name=new_name,
-            image_path=image_path,
         )
         success, message = await run_task_now(task)
         if not success:
-            await bot_modify.finish(f"立即修改失败: {message}")
+            await bot_modify_name.finish(f"立即修改名称失败: {message}")
     except ValueError as exception:
-        await bot_modify.finish(str(exception))
+        await bot_modify_name.finish(str(exception))
     except Exception as exception:
-        await bot_modify.finish(f"立即修改失败: {exception}")
+        await bot_modify_name.finish(f"立即修改名称失败: {exception}")
 
-    await bot_modify.finish("已立即修改机器人配置")
+    await bot_modify_name.finish("已立即修改机器人名称")
 
 
-@bot_schedule.handle()
-async def bot_schedule_handler(
+@bot_schedule_avatar.handle()
+async def bot_schedule_avatar_handler(
     event: PrivateMessageEvent | GroupMessageEvent, bot: Bot, arg=CommandArg()
 ) -> None:
     try:
         if not plugin_config.enable_self_avatar:
-            await bot_schedule.finish("当前未启用机器人自身头像/昵称修改功能")
+            await bot_schedule_avatar.finish("当前未启用机器人自身头像修改功能")
 
-        cron, image_path, new_name = await _parse_timed_modify_payload(arg)
-        _ensure_resource_available("self", None, image_path, new_name)
+        cron, image_path = await _parse_timed_avatar_payload(arg)
+        _ensure_avatar_resource_available("self", None, image_path)
+        task = ScheduleTask(
+            job_id=_build_job_id("self"),
+            target_type="self",
+            cron=cron,
+            image_path=image_path,
+        )
+        add_job(task)
+    except ValueError as exception:
+        await bot_schedule_avatar.finish(str(exception))
+    except Exception as exception:
+        await bot_schedule_avatar.finish(f"添加头像定时任务失败: {exception}")
+
+    await bot_schedule_avatar.finish(f"已添加头像定时任务 ID: {task.job_id}")
+
+
+@bot_schedule_name.handle()
+async def bot_schedule_name_handler(
+    event: PrivateMessageEvent | GroupMessageEvent, bot: Bot, arg=CommandArg()
+) -> None:
+    try:
+        if not plugin_config.enable_self_avatar:
+            await bot_schedule_name.finish("当前未启用机器人自身名称修改功能")
+
+        cron, new_name = await _parse_timed_name_payload(arg)
+        _ensure_name_resource_available("self", None, new_name)
         task = ScheduleTask(
             job_id=_build_job_id("self"),
             target_type="self",
             cron=cron,
             new_name=new_name,
-            image_path=image_path,
         )
         add_job(task)
     except ValueError as exception:
-        await bot_schedule.finish(str(exception))
+        await bot_schedule_name.finish(str(exception))
     except Exception as exception:
-        await bot_schedule.finish(f"添加定时任务失败: {exception}")
+        await bot_schedule_name.finish(f"添加名称定时任务失败: {exception}")
 
-    await bot_schedule.finish(f"已添加定时任务 ID: {task.job_id}")
+    await bot_schedule_name.finish(f"已添加名称定时任务 ID: {task.job_id}")
 
 
 @schedule_list.handle()

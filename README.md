@@ -8,7 +8,7 @@
 
 # nonebot-plugin-avatar-manager
 
-_✨ NoneBot2 头像管理插件，支持机器人和群资料的立即修改与定时修改 ✨_
+_✨ NoneBot2 头像管理插件，支持机器人和群资料的头像/名称立即修改与定时修改 ✨_
 
 <a href="./LICENSE">
     <img src="https://img.shields.io/github/license/Akiyy-dev/nonebot-plugin-avatar-manager.svg" alt="license">
@@ -99,30 +99,33 @@ ENABLE_GROUP_AVATAR=true
 | 头像帮助 | 超级管理员 / 群管理员 / 群主 | 否 | 私聊 / 群聊 | 查看插件帮助 |
 | 头像信息 | 超级管理员 | 否 | 私聊 | 查看机器人账号、昵称、头像地址与所在群列表 |
 | 群管 | 超级管理员 | 否 | 私聊 | 查看机器人在哪些群具备管理权限 |
-| 修改 | 群管理员 / 群主 | 否 | 群聊 | 立即修改当前群头像或群名称 |
-| 定时修改 | 群管理员 / 群主 | 否 | 群聊 | 为当前群创建定时修改任务 |
+| 修改头像 | 群管理员 / 群主 | 否 | 群聊 | 立即修改当前群头像 |
+| 修改名称 | 群管理员 / 群主 | 否 | 群聊 | 立即修改当前群名称 |
+| 定时修改头像 | 群管理员 / 群主 | 否 | 群聊 | 为当前群创建头像定时修改任务 |
+| 定时修改名称 | 群管理员 / 群主 | 否 | 群聊 | 为当前群创建名称定时修改任务 |
 | 上传 | 群管理员 / 群主 | 否 | 群聊 | 接收下一条消息并保存为本群头像资源或名称资源 |
 | 随机头像 | 群管理员 / 群主 | 否 | 群聊 | 从本地存储列表中随机更换当前群头像 |
 | 随机名称 | 群管理员 / 群主 | 否 | 群聊 | 从本地存储列表中随机更换当前群名称 |
 | 本地存储列表 | 群管理员 / 群主 | 否 | 群聊 | 分页查看当前群的本地头像/名称存储列表 |
 | 删除本地存储项 | 群管理员 / 群主 | 否 | 群聊 | 按序号删除当前群的本地头像或名称资源 |
-| bot修改 | 超级管理员 | 否 | 私聊 / 群聊 | 立即修改机器人头像或昵称 |
-| bot定时修改 | 超级管理员 | 否 | 私聊 / 群聊 | 为机器人自身创建定时修改任务 |
+| bot修改头像 | 超级管理员 | 否 | 私聊 / 群聊 | 立即修改机器人头像 |
+| bot修改名称 | 超级管理员 | 否 | 私聊 / 群聊 | 立即修改机器人名称 |
+| bot定时修改头像 | 超级管理员 | 否 | 私聊 / 群聊 | 为机器人自身创建头像定时修改任务 |
+| bot定时修改名称 | 超级管理员 | 否 | 私聊 / 群聊 | 为机器人自身创建名称定时修改任务 |
 | 定时列表 | 超级管理员 / 群管理员 / 群主 | 否 | 私聊 / 群聊 | 查看任务列表；群聊中只显示当前群任务 |
 | 删除定时 | 超级管理员 / 群管理员 / 群主 | 否 | 私聊 / 群聊 | 删除指定任务；群聊中仅可删除当前群任务 |
 
 ### 使用示例
 
 ```text
-修改 https://example.com/avatar.jpg
-修改 https://example.com/avatar_list.txt
-修改 name_list.txt
-修改 avatar_list.txt name_list.txt
-修改 新群名
-修改 https://example.com/avatar.jpg 新群名
-定时修改 0 8 * * * https://example.com/avatar.jpg
-定时修改 0 8 * * * https://example.com/avatar_list.txt name_list.txt
-定时修改 0 8 * * * 新群名
+修改头像 https://example.com/avatar.jpg
+修改头像 https://example.com/avatar_list.txt
+修改名称 新群名
+修改名称 name_list.txt
+定时修改头像 0 8 * * * https://example.com/avatar.jpg
+定时修改头像 0 8 * * * https://example.com/avatar_list.txt
+定时修改名称 0 8 * * * 新群名
+定时修改名称 0 8 * * * name_list.txt
 上传
 取消
 随机头像
@@ -132,8 +135,10 @@ ENABLE_GROUP_AVATAR=true
 本地存储列表 名称 1
 删除本地存储项 头像 3
 删除本地存储项 名称 2
-bot修改 https://example.com/avatar.jpg 新昵称
-bot定时修改 0 9 * * 1 https://example.com/avatar.jpg
+bot修改头像 https://example.com/avatar.jpg
+bot修改名称 新昵称
+bot定时修改头像 0 9 * * 1 https://example.com/avatar.jpg
+bot定时修改名称 0 9 * * 1 name_list.txt
 删除定时 avatar_group_20260409100000
 ```
 
