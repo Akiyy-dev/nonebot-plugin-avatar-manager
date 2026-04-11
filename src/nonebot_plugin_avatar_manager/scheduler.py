@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import nonebot
+from apscheduler.triggers.cron import CronTrigger
 from nonebot import logger
 from nonebot.adapters.onebot.v11 import Bot
 from nonebot.exception import ActionFailed
@@ -66,18 +67,40 @@ def save_tasks() -> None:
         logger.error(f"保存任务文件失败: {exception}")
 
 
-def _cron_to_kwargs(cron: str) -> dict[str, str]:
+def normalize_cron_expression(cron: str) -> str:
     parts = cron.split()
-    if len(parts) != 5:
-        raise ValueError("cron 格式错误，需要 5 段表达式")
+    if len(parts) not in {5, 6}:
+        raise ValueError("cron 格式错误，需要 5 或 6 段表达式")
 
-    return {
-        "minute": parts[0],
-        "hour": parts[1],
-        "day": parts[2],
-        "month": parts[3],
-        "day_of_week": parts[4],
-    }
+    return " ".join("*" if part == "?" else part for part in parts)
+
+
+def _cron_to_kwargs(cron: str) -> dict[str, str]:
+    parts = normalize_cron_expression(cron).split()
+    if len(parts) == 5:
+        cron_kwargs = {
+            "minute": parts[0],
+            "hour": parts[1],
+            "day": parts[2],
+            "month": parts[3],
+            "day_of_week": parts[4],
+        }
+    else:
+        cron_kwargs = {
+            "second": parts[0],
+            "minute": parts[1],
+            "hour": parts[2],
+            "day": parts[3],
+            "month": parts[4],
+            "day_of_week": parts[5],
+        }
+
+    try:
+        CronTrigger(**cron_kwargs)
+    except ValueError as exception:
+        raise ValueError(f"cron 表达式无效: {exception}") from exception
+
+    return cron_kwargs
 
 
 def _schedule_task(task: ScheduleTask) -> None:

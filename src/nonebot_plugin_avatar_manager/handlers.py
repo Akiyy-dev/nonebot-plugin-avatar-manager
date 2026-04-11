@@ -30,7 +30,14 @@ from .resources import (
     save_uploaded_image,
     save_uploaded_name,
 )
-from .scheduler import add_job, list_tasks, remove_job, run_task_now, tasks
+from .scheduler import (
+    add_job,
+    list_tasks,
+    normalize_cron_expression,
+    remove_job,
+    run_task_now,
+    tasks,
+)
 
 driver = get_driver()
 plugin_config = Config.model_validate(driver.config.dict())
@@ -343,6 +350,25 @@ async def _parse_name_payload(arg: Message) -> str | None:
     return plain_text
 
 
+def _split_timed_command_parts(parts: list[str]) -> tuple[str, list[str]]:
+    candidate_lengths = [5]
+    if len(parts) >= 6:
+        candidate_lengths = [6, 5] if "?" in parts[:6] else [5, 6]
+
+    for field_count in candidate_lengths:
+        if len(parts) < field_count:
+            continue
+
+        try:
+            cron = normalize_cron_expression(" ".join(parts[:field_count]))
+        except ValueError:
+            continue
+
+        return cron, parts[field_count:]
+
+    raise ValueError("cron 格式错误，需要 5 或 6 段表达式")
+
+
 async def _parse_timed_avatar_payload(arg: Message) -> tuple[str, str | None]:
     plain_text = arg.extract_plain_text().strip()
     if not plain_text:
@@ -350,10 +376,9 @@ async def _parse_timed_avatar_payload(arg: Message) -> tuple[str, str | None]:
 
     parts = shlex.split(plain_text)
     if len(parts) < 5:
-        raise ValueError("cron 格式错误，需要 5 段表达式")
+        raise ValueError("cron 格式错误，需要 5 或 6 段表达式")
 
-    cron = " ".join(parts[:5])
-    payload_parts = parts[5:]
+    cron, payload_parts = _split_timed_command_parts(parts)
 
     image_input = _extract_image_input(arg)
     if image_input is not None:
@@ -381,10 +406,9 @@ async def _parse_timed_name_payload(arg: Message) -> tuple[str, str | None]:
 
     parts = shlex.split(plain_text)
     if len(parts) < 5:
-        raise ValueError("cron 格式错误，需要 5 段表达式")
+        raise ValueError("cron 格式错误，需要 5 或 6 段表达式")
 
-    cron = " ".join(parts[:5])
-    payload_parts = parts[5:]
+    cron, payload_parts = _split_timed_command_parts(parts)
     payload_text = " ".join(payload_parts).strip()
     if not payload_text:
         return cron, None
