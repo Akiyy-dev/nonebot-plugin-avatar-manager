@@ -37,8 +37,8 @@ from .resources import (
 )
 from .scheduler import (
     add_job,
+    iter_valid_cron_prefixes,
     list_tasks,
-    normalize_cron_expression,
     remove_job,
     run_task_now,
     tasks,
@@ -414,23 +414,43 @@ async def _parse_name_payload(arg: Message) -> str | None:
     return _serialize_source_values(await _parse_name_source_values(plain_text))
 
 
-def _split_timed_command_parts(parts: list[str]) -> tuple[str, list[str]]:
-    candidate_lengths = [5]
-    if len(parts) >= 6:
-        candidate_lengths = [6, 5] if "?" in parts[:6] else [5, 6]
+def _iter_timed_command_candidates(parts: list[str]) -> list[tuple[str, list[str]]]:
+    candidates = [
+        (cron, parts[field_count:])
+        for field_count, cron in iter_valid_cron_prefixes(parts)
+    ]
+    if not candidates:
+        raise ValueError("cron 格式错误，需要 5、6 或 7 段表达式")
+    return candidates
 
-    for field_count in candidate_lengths:
-        if len(parts) < field_count:
-            continue
 
+async def _resolve_timed_payload_candidate(
+    parts: list[str],
+    payload_builder,
+) -> tuple[str, str | None]:
+    empty_payload_candidate: tuple[str, str | None] | None = None
+    last_payload_error: ValueError | None = None
+
+    for cron, payload_parts in _iter_timed_command_candidates(parts):
+        payload_text = " ".join(payload_parts).strip()
         try:
-            cron = normalize_cron_expression(" ".join(parts[:field_count]))
-        except ValueError:
+            payload = await payload_builder(payload_text)
+        except ValueError as exception:
+            last_payload_error = exception
             continue
 
-        return cron, parts[field_count:]
+        if not payload_text:
+            return cron, payload
+        if payload_text:
+            return cron, payload
+        if empty_payload_candidate is None:
+            empty_payload_candidate = (cron, payload)
 
-    raise ValueError("cron 格式错误，需要 5 或 6 段表达式")
+    if empty_payload_candidate is not None:
+        return empty_payload_candidate
+    if last_payload_error is not None:
+        raise last_payload_error
+    raise ValueError("cron 格式错误，需要 5、6 或 7 段表达式")
 
 
 async def _parse_timed_avatar_payload(arg: Message) -> tuple[str, str | None]:
@@ -440,22 +460,21 @@ async def _parse_timed_avatar_payload(arg: Message) -> tuple[str, str | None]:
 
     parts = shlex.split(plain_text)
     if len(parts) < 5:
-        raise ValueError("cron 格式错误，需要 5 或 6 段表达式")
-
-    cron, payload_parts = _split_timed_command_parts(parts)
-    payload_text = " ".join(payload_parts).strip()
+        raise ValueError("cron 格式错误，需要 5、6 或 7 段表达式")
 
     image_input = _extract_image_input(arg)
-    if image_input is not None:
-        image_source = await _resolve_image_value(image_input)
-        source_values = [] if image_source is None else [image_source]
+
+    async def _build_payload(payload_text: str) -> str | None:
+        source_values: list[str] = []
+        if image_input is not None:
+            image_source = await _resolve_image_value(image_input)
+            if image_source is not None:
+                source_values.append(image_source)
         if payload_text:
             source_values.extend(await _parse_avatar_source_values(payload_text))
-        return cron, _serialize_source_values(source_values)
+        return _serialize_source_values(source_values)
 
-    if not payload_text:
-        return cron, None
-    return cron, _serialize_source_values(await _parse_avatar_source_values(payload_text))
+    return await _resolve_timed_payload_candidate(parts, _build_payload)
 
 
 async def _parse_timed_name_payload(arg: Message) -> tuple[str, str | None]:
@@ -468,14 +487,14 @@ async def _parse_timed_name_payload(arg: Message) -> tuple[str, str | None]:
 
     parts = shlex.split(plain_text)
     if len(parts) < 5:
-        raise ValueError("cron 格式错误，需要 5 或 6 段表达式")
+        raise ValueError("cron 格式错误，需要 5、6 或 7 段表达式")
 
-    cron, payload_parts = _split_timed_command_parts(parts)
-    payload_text = " ".join(payload_parts).strip()
-    if not payload_text:
-        return cron, None
+    async def _build_payload(payload_text: str) -> str | None:
+        if not payload_text:
+            return None
+        return _serialize_source_values(await _parse_name_source_values(payload_text))
 
-    return cron, _serialize_source_values(await _parse_name_source_values(payload_text))
+    return await _resolve_timed_payload_candidate(parts, _build_payload)
 
 
 def _ensure_avatar_resource_available(
@@ -706,6 +725,7 @@ async def avatar_help_handler(
 
 注意:
 - 具体 API 可用性取决于你使用的 OneBot V11 实现。
+- cron 表达式支持 5 段、6 段（带秒）和 7 段（带秒与年）写法。
 - 图片清单 txt 与名称清单 txt 会在执行前重新读取，并与本群已上传资源合并。
 - 多个来源可使用 `&&` 连接，例如 `avatar_list.txt && ./avatars`。
 - `本地头像` 和 `本地名称` 可作为资源关键字使用。

@@ -16,6 +16,12 @@ from .utils import TEMP_DIR, image_to_base64
 tasks: dict[str, ScheduleTask] = {}
 data_dir = Path("data/avatar_manager")
 tasks_file = data_dir / "tasks.json"
+CRON_FIELD_LAYOUTS: tuple[tuple[str, ...], ...] = (
+    ("second", "minute", "hour", "day", "month", "day_of_week", "year"),
+    ("second", "minute", "hour", "day", "month", "day_of_week"),
+    ("minute", "hour", "day", "month", "day_of_week", "year"),
+    ("minute", "hour", "day", "month", "day_of_week"),
+)
 
 
 def _sorted_task_items(
@@ -67,40 +73,92 @@ def save_tasks() -> None:
         logger.error(f"保存任务文件失败: {exception}")
 
 
+def _normalize_cron_parts(parts: list[str]) -> list[str]:
+    return ["*" if part == "?" else part for part in parts]
+
+
+def _canonicalize_cron_parts(
+    fields: tuple[str, ...],
+    parts: list[str],
+) -> list[str]:
+    if fields == ("minute", "hour", "day", "month", "day_of_week", "year"):
+        return ["0", *parts]
+    return parts
+
+
+def _build_cron_kwargs(
+    fields: tuple[str, ...],
+    parts: list[str],
+) -> dict[str, str]:
+    return dict(zip(fields, parts, strict=True))
+
+
+def iter_valid_cron_prefixes(parts: list[str]) -> list[tuple[int, str]]:
+    normalized_parts = _normalize_cron_parts(parts)
+    valid_prefixes: list[tuple[int, str]] = []
+    seen_expressions: set[str] = set()
+
+    for fields in CRON_FIELD_LAYOUTS:
+        field_count = len(fields)
+        if len(normalized_parts) < field_count:
+            continue
+
+        candidate_parts = normalized_parts[:field_count]
+        cron_kwargs = _build_cron_kwargs(fields, candidate_parts)
+        try:
+            CronTrigger(**cron_kwargs)
+        except ValueError:
+            continue
+
+        canonical_expression = " ".join(
+            _canonicalize_cron_parts(fields, candidate_parts)
+        )
+        if canonical_expression in seen_expressions:
+            continue
+
+        seen_expressions.add(canonical_expression)
+        valid_prefixes.append((field_count, canonical_expression))
+
+    return valid_prefixes
+
+
 def normalize_cron_expression(cron: str) -> str:
     parts = cron.split()
-    if len(parts) not in {5, 6}:
-        raise ValueError("cron 格式错误，需要 5 或 6 段表达式")
+    if len(parts) not in {5, 6, 7}:
+        raise ValueError("cron 格式错误，需要 5、6 或 7 段表达式")
 
-    return " ".join("*" if part == "?" else part for part in parts)
+    return " ".join(_normalize_cron_parts(parts))
+
+
+def validate_cron_expression(cron: str) -> str:
+    parts = cron.split()
+    normalized_cron = normalize_cron_expression(cron)
+    for field_count, candidate in iter_valid_cron_prefixes(parts):
+        if field_count == len(parts):
+            return candidate
+
+    raise ValueError(f"cron 表达式无效: {normalized_cron}")
 
 
 def _cron_to_kwargs(cron: str) -> dict[str, str]:
-    parts = normalize_cron_expression(cron).split()
+    canonical_cron = validate_cron_expression(cron)
+    parts = canonical_cron.split()
     if len(parts) == 5:
-        cron_kwargs = {
-            "minute": parts[0],
-            "hour": parts[1],
-            "day": parts[2],
-            "month": parts[3],
-            "day_of_week": parts[4],
-        }
+        fields = ("minute", "hour", "day", "month", "day_of_week")
+    elif len(parts) == 6:
+        fields = ("second", "minute", "hour", "day", "month", "day_of_week")
     else:
-        cron_kwargs = {
-            "second": parts[0],
-            "minute": parts[1],
-            "hour": parts[2],
-            "day": parts[3],
-            "month": parts[4],
-            "day_of_week": parts[5],
-        }
+        fields = (
+            "second",
+            "minute",
+            "hour",
+            "day",
+            "month",
+            "day_of_week",
+            "year",
+        )
 
-    try:
-        CronTrigger(**cron_kwargs)
-    except ValueError as exception:
-        raise ValueError(f"cron 表达式无效: {exception}") from exception
-
-    return cron_kwargs
+    return _build_cron_kwargs(fields, parts)
 
 
 def _schedule_task(task: ScheduleTask) -> None:
