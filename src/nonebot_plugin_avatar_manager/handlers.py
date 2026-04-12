@@ -21,14 +21,19 @@ from .models import ScheduleTask
 from .resources import (
     classify_source_token,
     delete_local_storage_item,
+    get_local_storage_item,
     get_local_storage_page,
     get_local_storage_summary,
     has_uploaded_avatars,
     has_uploaded_names,
+    join_source_expression,
+    LOCAL_AVATAR_KEYWORD,
+    LOCAL_NAME_KEYWORD,
     resolve_avatar_resource,
     resolve_name_resource,
     save_uploaded_image,
     save_uploaded_name,
+    split_source_expression,
 )
 from .scheduler import (
     add_job,
@@ -197,6 +202,23 @@ delete_local_storage = on_command(
     block=True,
 )
 
+modify_local_resource = on_command(
+    "修改",
+    permission=GROUP_ADMIN | GROUP_OWNER,
+    rule=Rule(_group_only),
+    priority=5,
+    block=True,
+)
+
+use_local_storage = on_command(
+    "使用本地存储项",
+    aliases={"使用本地项"},
+    permission=GROUP_ADMIN | GROUP_OWNER,
+    rule=Rule(_group_only),
+    priority=5,
+    block=True,
+)
+
 
 def _extract_image_input(arg: Message) -> str | None:
     for segment in arg:
@@ -310,25 +332,75 @@ async def _resolve_image_value(image_input: str | None) -> str | None:
     raise ValueError("图片资源不存在")
 
 
+def _parse_source_segments(text: str) -> list[str]:
+    normalized_segments: list[str] = []
+    for raw_segment in split_source_expression(text):
+        try:
+            segment_parts = shlex.split(raw_segment)
+        except ValueError as exception:
+            raise ValueError(f"资源参数格式错误: {exception}") from exception
+
+        if not segment_parts:
+            raise ValueError("资源参数不能为空")
+
+        normalized_segments.append(" ".join(segment_parts))
+
+    return normalized_segments
+
+
+def _serialize_source_values(source_values: list[str]) -> str | None:
+    if not source_values:
+        return None
+    return join_source_expression(source_values)
+
+
+async def _parse_avatar_source_values(text: str) -> list[str]:
+    normalized_sources: list[str] = []
+    for segment in _parse_source_segments(text):
+        if segment == LOCAL_AVATAR_KEYWORD:
+            normalized_sources.append(segment)
+            continue
+
+        token_type = await classify_source_token(segment)
+        if token_type not in {"avatar", "avatar_collection", "avatar_manifest"}:
+            raise ValueError("请提供图片、目录或图片清单作为头像来源")
+        normalized_source = await _resolve_image_value(segment)
+        if normalized_source is None:
+            raise ValueError("图片资源不存在")
+        normalized_sources.append(normalized_source)
+    return normalized_sources
+
+
+async def _parse_name_source_values(text: str) -> list[str]:
+    normalized_sources: list[str] = []
+    for segment in _parse_source_segments(text):
+        if segment == LOCAL_NAME_KEYWORD:
+            normalized_sources.append(segment)
+            continue
+
+        token_type = await classify_source_token(segment)
+        if token_type == "name_manifest":
+            normalized_sources.append(segment)
+            continue
+        if token_type in {"avatar", "avatar_collection", "avatar_manifest"}:
+            raise ValueError("请提供名称文本或名称清单作为名称来源")
+        normalized_sources.append(segment)
+    return normalized_sources
+
+
 async def _parse_avatar_payload(arg: Message) -> str | None:
     plain_text = arg.extract_plain_text().strip()
-    parts = shlex.split(plain_text) if plain_text else []
     image_input = _extract_image_input(arg)
     if image_input is not None:
-        if parts:
-            raise ValueError("修改头像命令仅支持一个图片、目录或图片清单参数")
-        return await _resolve_image_value(image_input)
+        image_source = await _resolve_image_value(image_input)
+        source_values = [] if image_source is None else [image_source]
+        if plain_text:
+            source_values.extend(await _parse_avatar_source_values(plain_text))
+        return _serialize_source_values(source_values)
 
-    if not parts:
+    if not plain_text:
         return None
-    if len(parts) != 1:
-        raise ValueError("修改头像命令仅支持一个图片、目录或图片清单参数")
-
-    token_type = await classify_source_token(parts[0])
-    if token_type not in {"avatar", "avatar_collection", "avatar_manifest"}:
-        raise ValueError("请提供图片、目录或图片清单作为头像来源")
-
-    return await _resolve_image_value(parts[0])
+    return _serialize_source_values(await _parse_avatar_source_values(plain_text))
 
 
 async def _parse_name_payload(arg: Message) -> str | None:
@@ -339,15 +411,7 @@ async def _parse_name_payload(arg: Message) -> str | None:
     if not plain_text:
         return None
 
-    parts = shlex.split(plain_text)
-    if len(parts) == 1:
-        token_type = await classify_source_token(parts[0])
-        if token_type == "name_manifest":
-            return parts[0]
-        if token_type in {"avatar", "avatar_collection", "avatar_manifest"}:
-            raise ValueError("请提供名称文本或名称清单作为名称来源")
-
-    return plain_text
+    return _serialize_source_values(await _parse_name_source_values(plain_text))
 
 
 def _split_timed_command_parts(parts: list[str]) -> tuple[str, list[str]]:
@@ -379,21 +443,19 @@ async def _parse_timed_avatar_payload(arg: Message) -> tuple[str, str | None]:
         raise ValueError("cron 格式错误，需要 5 或 6 段表达式")
 
     cron, payload_parts = _split_timed_command_parts(parts)
+    payload_text = " ".join(payload_parts).strip()
 
     image_input = _extract_image_input(arg)
     if image_input is not None:
-        return cron, await _resolve_image_value(image_input)
+        image_source = await _resolve_image_value(image_input)
+        source_values = [] if image_source is None else [image_source]
+        if payload_text:
+            source_values.extend(await _parse_avatar_source_values(payload_text))
+        return cron, _serialize_source_values(source_values)
 
-    payload_text = " ".join(payload_parts).strip()
     if not payload_text:
         return cron, None
-    if len(payload_parts) != 1:
-        raise ValueError("定时修改头像命令仅支持一个图片、目录或图片清单参数")
-
-    token_type = await classify_source_token(payload_parts[0])
-    if token_type not in {"avatar", "avatar_collection", "avatar_manifest"}:
-        raise ValueError("请提供图片、目录或图片清单作为头像来源")
-    return cron, await _resolve_image_value(payload_parts[0])
+    return cron, _serialize_source_values(await _parse_avatar_source_values(payload_text))
 
 
 async def _parse_timed_name_payload(arg: Message) -> tuple[str, str | None]:
@@ -413,14 +475,7 @@ async def _parse_timed_name_payload(arg: Message) -> tuple[str, str | None]:
     if not payload_text:
         return cron, None
 
-    if len(payload_parts) == 1:
-        token_type = await classify_source_token(payload_parts[0])
-        if token_type == "name_manifest":
-            return cron, payload_parts[0]
-        if token_type in {"avatar", "avatar_collection", "avatar_manifest"}:
-            raise ValueError("请提供名称文本或名称清单作为名称来源")
-
-    return cron, payload_text
+    return cron, _serialize_source_values(await _parse_name_source_values(payload_text))
 
 
 def _ensure_avatar_resource_available(
@@ -510,6 +565,83 @@ def _parse_storage_delete_args(arg: Message) -> tuple[str, int]:
     return kind, index
 
 
+def _parse_local_modify_args(arg: Message) -> tuple[str, int | None]:
+    plain_text = arg.extract_plain_text().strip()
+    if not plain_text:
+        raise ValueError("请使用：修改 本地头像 或 修改 本地名称")
+
+    parts = shlex.split(plain_text)
+    if not parts or len(parts) > 2:
+        raise ValueError("请使用：修改 本地头像 [序号] 或 修改 本地名称 [序号]")
+
+    kind_mapping = {
+        LOCAL_AVATAR_KEYWORD: "avatar",
+        LOCAL_NAME_KEYWORD: "name",
+    }
+    kind = kind_mapping.get(parts[0])
+    if kind is None:
+        raise ValueError("请使用：修改 本地头像 或 修改 本地名称")
+
+    if len(parts) == 1:
+        return kind, None
+
+    if not parts[1].isdigit():
+        raise ValueError("序号必须为正整数")
+
+    index = int(parts[1])
+    if index < 1:
+        raise ValueError("序号必须大于等于 1")
+    return kind, index
+
+
+async def _use_local_storage_item(
+    event: GroupMessageEvent,
+    kind: str,
+    index: int | None,
+) -> str:
+    group_id = int(event.group_id)
+    if kind == "avatar":
+        image_path = (
+            get_local_storage_item("group", group_id, "avatar", index)
+            if index is not None
+            else await resolve_avatar_resource(None, "group", group_id, False)
+        )
+        if image_path is None:
+            raise ValueError("当前本地存储列表中没有可用头像资源")
+
+        success, message = await _run_immediate_change(
+            "group",
+            target_id=group_id,
+            image_path=image_path,
+        )
+        if not success:
+            raise ValueError(f"使用本地头像失败: {message}")
+
+        if index is None:
+            return "已使用本地头像资源修改当前群头像"
+        return f"已使用本地头像存储项 #{index} 修改当前群头像"
+
+    name_value = (
+        get_local_storage_item("group", group_id, "name", index)
+        if index is not None
+        else await resolve_name_resource(None, "group", group_id, False)
+    )
+    if name_value is None:
+        raise ValueError("当前本地存储列表中没有可用名称资源")
+
+    success, message = await _run_immediate_change(
+        "group",
+        target_id=group_id,
+        new_name=name_value,
+    )
+    if not success:
+        raise ValueError(f"使用本地名称失败: {message}")
+
+    if index is None:
+        return "已使用本地名称资源修改当前群名称"
+    return f"已使用本地名称存储项 #{index} 修改当前群名称"
+
+
 @avatar_help.handle()
 async def avatar_help_handler(
     event: PrivateMessageEvent | GroupMessageEvent, bot: Bot, arg=CommandArg()
@@ -521,6 +653,7 @@ async def avatar_help_handler(
 - 头像帮助 / avatar_help
 - 头像信息 / avatar_info
 - 群管
+- 修改
 - 修改头像
 - 修改名称
 - 定时修改头像
@@ -533,17 +666,24 @@ async def avatar_help_handler(
 - 随机头像
 - 随机名称
 - 本地存储列表
+- 使用本地存储项
 - 删除本地存储项
 - 定时列表 / schedule_list
 - 删除定时 / del_schedule
 
 示例:
+- 群聊中发送：修改 本地头像
+- 群聊中发送：修改 本地名称 2
 - 群聊中发送：修改头像 https://example.com/avatar.jpg
 - 群聊中发送：修改头像 https://example.com/avatar_list.txt
+- 群聊中发送：修改头像 https://example.com/avatar_list.txt && ./avatars
 - 群聊中发送：修改名称 新群名
 - 群聊中发送：修改名称 name_list.txt
+- 群聊中发送：修改名称 name_list.txt && 备用群名
 - 群聊中发送：定时修改头像 0 8 * * * https://example.com/avatar_list.txt
+- 群聊中发送：定时修改头像 0 8 * * * https://example.com/avatar_list.txt && ./avatars
 - 群聊中发送：定时修改名称 0 8 * * * name_list.txt
+- 群聊中发送：定时修改名称 0 8 * * * name_list.txt && 备用群名
 - 群聊中发送：上传
 - 群聊中发送：取消
 - 群聊中发送：随机头像
@@ -551,6 +691,8 @@ async def avatar_help_handler(
 - 群聊中发送：本地存储列表
 - 群聊中发送：本地存储列表 头像 2
 - 群聊中发送：本地存储列表 名称 1
+- 群聊中发送：使用本地存储项 头像 3
+- 群聊中发送：使用本地存储项 名称 2
 - 群聊中发送：删除本地存储项 头像 3
 - 群聊中发送：删除本地存储项 名称 2
 - 私聊或群聊中超级管理员发送：bot修改头像 https://example.com/avatar.jpg
@@ -565,6 +707,9 @@ async def avatar_help_handler(
 注意:
 - 具体 API 可用性取决于你使用的 OneBot V11 实现。
 - 图片清单 txt 与名称清单 txt 会在执行前重新读取，并与本群已上传资源合并。
+- 多个来源可使用 `&&` 连接，例如 `avatar_list.txt && ./avatars`。
+- `本地头像` 和 `本地名称` 可作为资源关键字使用。
+- 也可通过 `修改 本地头像 [序号]` 直接调用本地资源。
 - 上传图片会保存到 data 中，并写入本群本地存储列表。
 - 本地存储列表支持分页查看，适合头像资源较多时逐页检查。
 - 删除本地存储项使用列表中显示的全局序号，而不是页内序号。
@@ -915,6 +1060,22 @@ async def upload_resource_receive_handler(
     await upload_resource.finish(f"名称资源已存在: {text}")
 
 
+@modify_local_resource.handle()
+async def modify_local_resource_handler(
+    event: GroupMessageEvent,
+    arg=CommandArg(),
+) -> None:
+    try:
+        kind, index = _parse_local_modify_args(arg)
+        message = await _use_local_storage_item(event, kind, index)
+    except ValueError as exception:
+        await modify_local_resource.finish(str(exception))
+    except Exception as exception:
+        await modify_local_resource.finish(f"调用本地资源失败: {exception}")
+
+    await modify_local_resource.finish(message)
+
+
 @random_avatar.handle()
 async def random_avatar_handler(event: GroupMessageEvent, bot: Bot) -> None:
     image_path = await resolve_avatar_resource(
@@ -1008,6 +1169,26 @@ async def local_storage_list_handler(
         lines.append(f"下一页: 本地存储列表 {title} {page + 1}")
 
     await local_storage_list.finish("\n".join(lines))
+
+
+@use_local_storage.handle()
+async def use_local_storage_handler(
+    event: GroupMessageEvent,
+    arg=CommandArg(),
+) -> None:
+    try:
+        kind, index = _parse_storage_delete_args(arg)
+        message = await _use_local_storage_item(event, kind, index)
+    except ValueError as exception:
+        error_message = str(exception).replace(
+            "删除本地存储项",
+            "使用本地存储项",
+        )
+        await use_local_storage.finish(error_message)
+    except Exception as exception:
+        await use_local_storage.finish(f"调用本地存储项失败: {exception}")
+
+    await use_local_storage.finish(message)
 
 
 @delete_local_storage.handle()

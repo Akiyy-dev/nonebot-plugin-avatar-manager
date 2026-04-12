@@ -26,6 +26,9 @@ MAX_IMAGE_HEIGHT = 4096
 MAX_IMAGE_PIXELS = 4096 * 4096
 AVATAR_LIST_PAGE_SIZE = 15
 NAME_LIST_PAGE_SIZE = 20
+SOURCE_LINK_DELIMITER = "&&"
+LOCAL_AVATAR_KEYWORD = "本地头像"
+LOCAL_NAME_KEYWORD = "本地名称"
 
 _selection_state: dict[str, dict[str, list[str]]] | None = None
 
@@ -111,6 +114,19 @@ def _prune_selection_history(target_key: str, kind: str, removed_value: str) -> 
 
 def _is_remote_url(value: str) -> bool:
     return value.startswith(("http://", "https://"))
+
+
+def split_source_expression(value: str) -> list[str]:
+    segments = [segment.strip() for segment in value.split(SOURCE_LINK_DELIMITER)]
+    if not segments or any(not segment for segment in segments):
+        raise ValueError(
+            "多源配置格式错误，请使用 来源1 && 来源2 的形式连接资源"
+        )
+    return segments
+
+
+def join_source_expression(values: list[str]) -> str:
+    return f" {SOURCE_LINK_DELIMITER} ".join(values)
 
 
 def _ensure_remote_url(url: str) -> None:
@@ -519,6 +535,31 @@ def get_local_storage_page(
     return page_items, total, total_pages, start_index
 
 
+def get_local_storage_item(
+    target_type: str,
+    target_id: int | None,
+    kind: str,
+    index: int,
+) -> str:
+    if index < 1:
+        raise ValueError("序号必须大于等于 1")
+
+    target_key = build_target_key(target_type, target_id)
+    if kind == "avatar":
+        all_items = _list_uploaded_images(target_key)
+        if index > len(all_items):
+            raise ValueError(f"头像序号超出范围，当前最大序号为 {len(all_items)}")
+        return all_items[index - 1]
+
+    if kind == "name":
+        all_items = _list_uploaded_names(target_key)
+        if index > len(all_items):
+            raise ValueError(f"名称序号超出范围，当前最大序号为 {len(all_items)}")
+        return all_items[index - 1]
+
+    raise ValueError("不支持的存储列表类型")
+
+
 def delete_local_storage_item(
     target_type: str,
     target_id: int | None,
@@ -676,32 +717,40 @@ async def resolve_avatar_resource(
         selected = _select_candidate(target_key, "avatar", uploaded_images, scheduled)
         return await _materialize_avatar_candidate(target_key, selected)
 
-    if _looks_like_directory_source(source):
-        source_candidates = _list_local_image_files(Path(source))
+    source_candidates: list[str] = []
+    include_uploaded_images = False
+    for source_value in split_source_expression(source):
+        if source_value == LOCAL_AVATAR_KEYWORD:
+            include_uploaded_images = True
+            continue
 
-        all_candidates = source_candidates + _list_uploaded_images(target_key)
-        if not all_candidates:
-            return None
-        selected = _select_candidate(target_key, "avatar", all_candidates, scheduled)
-        return await _materialize_avatar_candidate(target_key, selected)
+        if _looks_like_directory_source(source_value):
+            source_candidates.extend(_list_local_image_files(Path(source_value)))
+            include_uploaded_images = True
+            continue
 
-    if _looks_like_txt_source(source):
-        source_type = await classify_source_token(source)
-        if source_type != "avatar_manifest":
-            raise ValueError("提供的 txt 清单不是头像图片清单")
+        if _looks_like_txt_source(source_value):
+            source_type = await classify_source_token(source_value)
+            if source_type != "avatar_manifest":
+                raise ValueError("提供的 txt 清单不是头像图片清单")
+            source_candidates.extend(await _load_avatar_manifest(source_value))
+            include_uploaded_images = True
+            continue
 
-        source_candidates = await _load_avatar_manifest(source)
+        if _looks_like_image_file_source(source_value):
+            source_candidates.append(source_value)
+            continue
 
-        all_candidates = source_candidates + _list_uploaded_images(target_key)
-        if not all_candidates:
-            return None
-        selected = _select_candidate(target_key, "avatar", all_candidates, scheduled)
-        return await _materialize_avatar_candidate(target_key, selected)
+        raise ValueError("头像资源必须是图片文件、本地目录或图片清单 txt")
 
-    if _looks_like_image_file_source(source):
-        return await _materialize_avatar_candidate(target_key, source)
+    if include_uploaded_images:
+        source_candidates.extend(_list_uploaded_images(target_key))
 
-    raise ValueError("头像资源必须是图片文件、本地目录或图片清单 txt")
+    if not source_candidates:
+        return None
+
+    selected = _select_candidate(target_key, "avatar", source_candidates, scheduled)
+    return await _materialize_avatar_candidate(target_key, selected)
 
 
 async def resolve_name_resource(
@@ -718,16 +767,27 @@ async def resolve_name_resource(
             return None
         return _select_candidate(target_key, "name", uploaded_names, scheduled)
 
-    if _looks_like_txt_source(source):
-        source_type = await classify_source_token(source)
-        if source_type != "name_manifest":
-            raise ValueError("提供的 txt 清单不是名称清单")
+    source_names: list[str] = []
+    include_uploaded_names = False
+    for source_value in split_source_expression(source):
+        if source_value == LOCAL_NAME_KEYWORD:
+            include_uploaded_names = True
+            continue
 
-        source_names = await _load_name_manifest(source)
+        if _looks_like_txt_source(source_value):
+            source_type = await classify_source_token(source_value)
+            if source_type != "name_manifest":
+                raise ValueError("提供的 txt 清单不是名称清单")
+            source_names.extend(await _load_name_manifest(source_value))
+            include_uploaded_names = True
+            continue
 
-        all_candidates = source_names + _list_uploaded_names(target_key)
-        if not all_candidates:
-            return None
-        return _select_candidate(target_key, "name", all_candidates, scheduled)
+        source_names.append(_validate_name_value(source_value))
 
-    return _validate_name_value(source)
+    if include_uploaded_names:
+        source_names.extend(_list_uploaded_names(target_key))
+
+    if not source_names:
+        return None
+
+    return _select_candidate(target_key, "name", source_names, scheduled)
